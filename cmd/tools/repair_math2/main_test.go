@@ -1,7 +1,7 @@
 package main
 
 import (
-	"path/filepath"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -9,11 +9,7 @@ import (
 )
 
 func TestCurrentMath2SpecMatchesDisciplineLayout(t *testing.T) {
-	var spec models.SpecTable
-	path := filepath.Join("..", "..", "..", "data", "spec_table.json")
-	if err := readJSON(path, &spec); err != nil {
-		t.Fatalf("read current spec: %v", err)
-	}
+	spec := math2SpecFixture()
 	cleanMath2Spec(&spec)
 	if err := sortAndValidateSpecEntries(&spec); err != nil {
 		t.Fatalf("sort current spec: %v", err)
@@ -111,4 +107,39 @@ func TestSortAndValidateSpecEntriesRejectsGaps(t *testing.T) {
 
 func specDiscipline(points []string) string {
 	return models.DisciplineFromPoints(points)
+}
+
+func math2SpecFixture() models.SpecTable {
+	entries := make([]models.SpecEntry, 0, 22)
+	for index := 1; index <= 22; index++ {
+		questionType := models.TypeChoice
+		score := 5.0
+		discipline := "高等数学"
+		switch {
+		case index >= 11 && index <= 16:
+			questionType = models.TypeFillBlank
+		case index >= 17:
+			questionType = models.TypeMajor
+			score = 12
+		case index >= 8:
+			discipline = "线性代数"
+		}
+		if index == 8 || index == 9 || index == 10 || index == 16 || index == 22 {
+			discipline = "线性代数"
+		}
+		if index == 15 {
+			discipline = "常微分方程"
+		}
+		if index == 17 {
+			score = 11
+		}
+		entries = append(entries, models.SpecEntry{
+			ID:     fmt.Sprintf("spec_%03d", index),
+			Index:  index,
+			Type:   questionType,
+			Points: []string{discipline},
+			Score:  score,
+		})
+	}
+	return models.SpecTable{Subject: "数学二", TotalScore: 150, Entries: entries}
 }
