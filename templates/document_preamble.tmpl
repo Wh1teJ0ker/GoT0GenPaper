@@ -1,0 +1,33 @@
+{{%define "document_preamble"%}}\documentclass[12pt]{ctexart}
+\usepackage[a4paper,top=2.4cm,bottom=2.4cm,left=2.4cm,right=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\usepackage{newunicodechar}
+%% CJK 正文字体缺数学符号字形 — 映射到数学模式保证可见
+\newunicodechar{≥}{\ensuremath{\geq}}
+\newunicodechar{≤}{\ensuremath{\leq}}
+\newunicodechar{≠}{\ensuremath{\neq}}
+\newunicodechar{±}{\ensuremath{\pm}}
+\newunicodechar{∪}{\ensuremath{\cup}}
+\newunicodechar{∩}{\ensuremath{\cap}}
+\newunicodechar{∼}{\ensuremath{\sim}}
+\newunicodechar{Ⅰ}{\ensuremath{\mathrm{I}}}
+\newunicodechar{Ⅱ}{\ensuremath{\mathrm{II}}}
+\newunicodechar{Ⅲ}{\ensuremath{\mathrm{III}}}
+\newunicodechar{Ⅳ}{\ensuremath{\mathrm{IV}}}
+%% OCR 常把拉丁字母 P 识别为西里尔字母 Р — 保留为可见的拉丁 P
+\newunicodechar{Р}{P}
+\newunicodechar{ }{\hspace{1em}}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[L]{\zihao{5}{{% .Left %}}}
+\fancyfoot[C]{\zihao{5}第 \thepage\ 页 共 \pageref{LastPage} 页}
+\fancyfoot[R]{\zihao{5}{{% .Right %}}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+\emergencystretch=3em
+\begin{document}
+{{%end%}}

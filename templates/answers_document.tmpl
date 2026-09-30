@@ -1,0 +1,9 @@
+{{%define "answers_document"%}}{{%template "document_preamble" .Footer%}}
+\begin{center}
+{\zihao{3}\bfseries {{% .HeadLine %}}}\par\vspace{0.6em}
+{\zihao{-3}\bfseries 参考答案}\par
+\end{center}\vspace{0.8em}
+
+{{%range .Answers%}}{{%template "answer_block" .%}}
+{{%end%}}\end{document}
+{{%end%}}

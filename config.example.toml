@@ -1,0 +1,27 @@
+# Copy to config.toml and set provider credentials locally.
+# config.toml is ignored by Git. Protect it with: chmod 600 config.toml
+
+[paths]
+data_dir = "./data"
+output_dir = "./output"
+templates = "./templates"
+
+[providers]
+active_id = "glm-local"
+
+[[providers.providers]]
+id = "glm-local"
+name = "Local GLM 5.2"
+base_url = "http://127.0.0.1:3001"
+api_key = ""
+default_model = "glm-5.2"
+judge_model = "glm-5.2"
+vision_model = "glm-5.2"
+reasoning_effort = "low"
+max_tokens = 8192
+enabled = true
+
+[providers.providers.model_by_type]
+choice = "glm-5.2"
+fill_blank = "glm-5.2"
+major = "glm-5.2"

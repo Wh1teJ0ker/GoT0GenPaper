@@ -1,0 +1,10 @@
+{{%define "answer_block"%}}\noindent{\bfseries 第{{% .Number %}}题}\par
+{\bfseries 参考答案:}\par
+{{% .Answer %}}
+
+{{%if .RubricItems%}}{\bfseries 评分标准:}
+\begin{itemize}
+\sloppy
+{{%range .RubricItems%}}\item {{% . %}}
+{{%end%}}\end{itemize}
+{{%end%}}{{%end%}}

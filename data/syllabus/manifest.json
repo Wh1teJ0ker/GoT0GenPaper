@@ -1,0 +1,84 @@
+{
+  "retrievedAt": "2026-09-25",
+  "targetExam": "2027",
+  "subjects": [
+    {
+      "key": "408",
+      "label": "408",
+      "edition": "2026",
+      "status": "verified_structure",
+      "syllabusVerified": false,
+      "path": "data/syllabus/408.md",
+      "officialPublisher": "教育部教育考试院；人民教育出版社",
+      "sources": [
+        "https://www.kmxwd.com/uploads/images/20251015/68eef5daf0564.pdf",
+        "https://yjsglxt.scau.edu.cn/open/Wechat/SsZsZyml/Kskm.aspx?kskmdm=408&kskmmc=408%7C%E8%AE%A1%E7%AE%97%E6%9C%BA%E5%AD%A6%E7%A7%91%E4%B8%93%E4%B8%9A%E5%9F%BA%E7%A1%80&nd=2026"
+      ]
+    },
+    {
+      "key": "math1",
+      "label": "数学一",
+      "edition": "2026",
+      "status": "verified_structure",
+      "syllabusVerified": false,
+      "path": "data/syllabus/math1.md",
+      "officialPublisher": "高等教育出版社",
+      "sources": ["https://jingweimath.com/syllabus.html"]
+    },
+    {
+      "key": "math2",
+      "label": "数学二",
+      "edition": "2026",
+      "status": "verified_structure",
+      "syllabusVerified": false,
+      "path": "data/syllabus/math2.md",
+      "officialPublisher": "高等教育出版社",
+      "sources": ["https://jingweimath.com/syllabus.html"]
+    },
+    {
+      "key": "english1",
+      "label": "英语一",
+      "edition": "2026",
+      "status": "partial",
+      "syllabusVerified": false,
+      "path": "data/syllabus/english1.md",
+      "officialPublisher": "教育部教育考试院；人民教育出版社",
+      "sources": [
+        "https://zhenti99.com/dagang/%E8%80%83%E7%A0%94%E8%8B%B1%E8%AF%AD/",
+        "https://www.hqwx.com/kaoyan-kaoshi/ziliaolm/1449224.html",
+        "https://oss-hqwx-video.hqwx.com/%E8%80%83%E7%A0%94%E8%8B%B1%E8%AF%AD%E5%A4%A7%E7%BA%B2-%E8%8B%B1%E8%AF%AD%E4%B8%80%EF%BC%882027%E5%B9%B4%EF%BC%89_a541f804ebddb64fd99740758be929ccc7f1f30c.pdf",
+        "https://yz.chsi.com.cn/"
+      ]
+    },
+    {
+      "key": "english2",
+      "label": "英语二",
+      "edition": "2026",
+      "status": "partial",
+      "syllabusVerified": false,
+      "path": "data/syllabus/english2.md",
+      "officialPublisher": "教育部教育考试院；人民教育出版社",
+      "sources": [
+        "https://opac.ouc.edu.cn/mspace/searchDetailLocal/md8d32e0516b80bec5db07f480f9fb792",
+        "https://zhenti99.com/dagang/%E8%80%83%E7%A0%94%E8%8B%B1%E8%AF%AD/",
+        "https://www.hqwx.com/kaoyan-kaoshi/ziliaolm/1449225.html",
+        "https://oss-hqwx-video.hqwx.com/%E8%80%83%E7%A0%94%E8%8B%B1%E8%AF%AD%E5%A4%A7%E7%BA%B2-%E8%8B%B1%E8%AF%AD%E4%BA%8C%EF%BC%882027%E5%B9%B4%EF%BC%89_34baf4c51639a892977b4054e65ccd0fb77e32b7.pdf"
+      ]
+    },
+    {
+      "key": "politics",
+      "label": "政治",
+      "edition": "2026; 2027 transition",
+      "status": "transition",
+      "syllabusVerified": false,
+      "path": "data/syllabus/politics.md",
+      "officialPublisher": "教育部教育考试院；人民教育出版社",
+      "sources": [
+        "https://www.megbook.com.tw/mall/detail.jsp?proID=4159356",
+        "https://www.hqwx.com/kaoyan-kaoshi/ziliaolm/1449220.html",
+        "https://oss-hqwx-video.hqwx.com/%E8%80%83%E7%A0%94%E6%94%BF%E6%B2%BB%E5%A4%A7%E7%BA%B2%EF%BC%882027%E5%B9%B4%EF%BC%89_9f9ef4ca12b458712ec93e951df44f04e4edbe12.pdf",
+        "https://yankao.neea.edu.cn/"
+      ]
+    }
+  ]
+}

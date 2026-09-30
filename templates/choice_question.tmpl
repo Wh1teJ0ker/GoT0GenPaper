@@ -1,0 +1,6 @@
+{{%define "choice_options"%}}{{%range .%}}{{%$row := .%}}{{%range $i, $option := .Options%}}{{%if $i%}}{{%$row.Separator%}}{{%end%}}{{%$option.Label%}}．{{%$option.Text%}}{{%end%}}{{%if .BlankAfter%}}
+
+{{%else%}}
+{{%end%}}{{%end%}}{{%end%}}
+{{%define "choice_question"%}}\noindent{\bfseries {{% .Number %}}．}{{% .Stem %}}\par\vspace{0.35em}
+{{%template "choice_options" .OptionRows%}}{{%end%}}

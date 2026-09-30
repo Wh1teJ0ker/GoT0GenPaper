@@ -1,0 +1,25 @@
+{{%define "exam_document"%}}{{%template "document_preamble" .Footer%}}
+{{%if .HasCover%}}\begin{titlepage}
+\thispagestyle{empty}
+\centering
+\vspace*{6cm}
+{{%range .CoverLines%}}{{% . %}}\par\vspace{1.2em}
+{{%end%}}\vfill
+\begin{flushleft}\zihao{5}
+\end{flushleft}
+\end{titlepage}
+\pagenumbering{arabic}
+\setcounter{page}{1}
+\pagestyle{fancy}
+{{%end%}}\begin{center}
+{\zihao{3}\bfseries {{% .HeadLine %}}}\par\vspace{1em}
+{{%if .FullTitle%}}{\zihao{-3}\bfseries {{% .FullTitle %}}}\par
+{{%else if .Subject%}}{\zihao{-3}\bfseries {{% .Subject %}} 试题}\par
+{{%end%}}\end{center}\vspace{0.8em}
+
+{{%range .Sections%}}\noindent{\bfseries {{% .Title %}}（{{% .Detail %}}）}\par\vspace{0.6em}
+
+{{%range .Questions%}}{{% . %}}
+
+{{%end%}}{{%end%}}\end{document}
+{{%end%}}

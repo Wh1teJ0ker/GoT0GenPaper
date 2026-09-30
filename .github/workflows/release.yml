@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l $(find cmd internal -type f -name '*.go' -print))"
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build target binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist package
+          release_name="got0genpaper-${GOOS}-${GOARCH}"
+          if [ "${GOOS}" = "windows" ]; then
+            binary_name="${release_name}.exe"
+          else
+            binary_name="${release_name}"
+          fi
+
+          go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o "package/${release_name}/${binary_name}" \
+            ./cmd/got0genpaper
+
+          cp README.md LICENSE config.example.toml "package/${release_name}/"
+          cp -R docs "package/${release_name}/"
+
+          if [ "${GOOS}" = "windows" ]; then
+            (cd package && zip -qr "../dist/${release_name}.zip" "${release_name}")
+          else
+            tar -C package -czf "dist/${release_name}.tar.gz" "${release_name}"
+          fi
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: got0genpaper-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/got0genpaper-*
+          if-no-files-found: error
+          retention-days: 5
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: got0genpaper-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: dist
+        run: sha256sum got0genpaper-* > SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "GoT0GenPaper ${GITHUB_REF_NAME}" \
+            --generate-notes

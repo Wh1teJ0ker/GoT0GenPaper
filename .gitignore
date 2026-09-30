@@ -1,0 +1,29 @@
+output/*
+*.log
+*.pdf
+/got0genpaper
+.DS_Store
+
+# Local credentials and machine-specific runtime state.
+/config.toml
+/config.json
+/bin/
+/dist/
+/tmp/
+/data/blueprint.json
+/data/generated_questions.json
+/data/gnn_cooccurrence.json
+/data/gnn_weights.json
+/data/parse_result.json
+/data/review_results.json
+/data/spec_table.json
+
+# Python and LaTeX build caches.
+__pycache__/
+*.py[cod]
+.venv/
+*.aux
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.xdv
