@@ -4,16 +4,17 @@
 
 ## 版本来源
 
-- `VERSION`：本地构建版本的单一来源，当前为 `0.1.0`。
+- `VERSION`：本地构建版本的单一来源，当前为 `0.1.1`。
 - `make build`：读取 `VERSION` 并通过 Go linker flag 注入 `main.version`。
-- Git 标签：正式发布版本，例如 `v0.1.0`；发布工作流会使用 `GITHUB_REF_NAME` 覆盖本地版本。
+- Git 标签：正式发布版本，例如 `v0.1.1`；发布工作流会使用 `GITHUB_REF_NAME` 覆盖本地版本。
 - `got0genpaper version`：查看最终编译进二进制的版本。
 
-发布前如果要创建正式版本，应先确认代码和文档已提交，再创建对应标签：
+发布前确认目标提交已包含源码、测试和文档，并通过 CI；然后创建标签并推送：
 
 ```bash
-git tag -a v0.1.0 -m "GoT0GenPaper v0.1.0"
-git push origin v0.1.0
+git tag -a vX.Y.Z -m "GoT0GenPaper vX.Y.Z"
+git push origin main
+git push origin vX.Y.Z
 ```
 
 ## CI 检查
@@ -46,22 +47,18 @@ CI 不访问 LLM，不需要 `config.toml`、API Key、TeX 或 OCR。实时文�
 发布前更新变更记录并提交，然后在 GitHub 仓库推送版本标签：
 
 ```bash
-git tag -a v0.1.0 -m "GoT0GenPaper v0.1.0"
-git push origin v0.1.0
+git tag -a vX.Y.Z -m "GoT0GenPaper vX.Y.Z"
+git push origin main
+git push origin vX.Y.Z
 ```
 
 在 GitHub 的 Actions 页面等待 `Release` 工作流成功。Release job 使用仓库内置 `GITHUB_TOKEN`，无需额外 PAT；仓库设置须允许 Actions 创建 releases。不要从未通过检查的 commit 打标签。
 
-## 启用步骤
+## 仓库状态
 
-当前工作目录尚未配置 Git 元数据或远程仓库，所以本地无法触发 GitHub Actions。要启用远程 CI/CD：
+项目已连接公开 GitHub 仓库 [`Wh1teJ0ker/GoT0GenPaper`](https://github.com/Wh1teJ0ker/GoT0GenPaper)，默认分支为 `main`，远程名为 `origin`；CI 和标签发布工作流均已配置。正常使用不需要重新创建仓库或配置远程。
 
-1. 在 GitHub 创建空仓库并将本项目放入该 Git 仓库；不要加入 `config.toml`、`output/`、`tmp/` 或真实用户数据。
-2. 配置 `origin` 并推送默认分支。
-3. 确认仓库 Actions 已启用；`Settings → Actions → General → Workflow permissions` 保持默认读权限即可，发布工作流在发布 job 单独声明 `contents: write`。
-4. 提交一个普通变更确认 CI 绿色；只有需要发版时再推送 `vX.Y.Z` 标签。
-
-仓库接入 GitHub 后，检查 `.gitignore` 生效，并在首个提交前核对待提交清单。若曾将 API Key 提交到任何 Git 远端，删除文件并不足以使密钥失效，应立即在供应商控制台撤销/轮换。
+若发布工作流未能创建 Release，检查 GitHub 仓库 Actions 是否启用，以及工作流是否有 `contents: write` 权限。推送前仍需审阅暂存清单；若 API Key 曾进入 Git 历史，应立即在供应商控制台撤销或轮换，单纯删除文件不能使其失效。
 
 ## 本地模拟 CI
 

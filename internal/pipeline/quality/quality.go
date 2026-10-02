@@ -21,6 +21,11 @@ var pollutionTokens = []string{
 
 var bareAnswer = regexp.MustCompile(`^(?:答案|参考答案|answer|n/?a)[。.!！:：]?\s*$`)
 
+var selfCorrectionTokens = []string{
+	"题目有误", "条件之间存在矛盾", "修改题面", "重新审视",
+	"假设题意", "如果题目要求", "不太对", "需手动补充",
+}
+
 // Issues returns deterministic quality failures for one generated question.
 // An empty result means the question is suitable for the next stage.
 func Issues(q models.GeneratedQuestion) []string {
@@ -36,6 +41,12 @@ func Issues(q models.GeneratedQuestion) []string {
 	}
 	if polluted(q.Answer) {
 		issues = append(issues, "参考答案包含疑似模型污染文本")
+	}
+	for _, token := range selfCorrectionTokens {
+		if strings.Contains(q.Stem, token) || strings.Contains(q.Answer, token) {
+			issues = append(issues, "题面或参考答案包含自我纠错文本")
+			break
+		}
 	}
 	if !finiteInRange(q.Difficulty, 0, 1) {
 		issues = append(issues, "难度不在 0 到 1 范围内")

@@ -7,7 +7,45 @@ import (
 	"testing"
 
 	"GoT0GenPaper/internal/models"
+	"GoT0GenPaper/internal/pipeline/quality"
 )
+
+func TestAllocateDifficultyCountsUsesLargestRemainder(t *testing.T) {
+	counts, err := AllocateDifficultyCounts(map[models.DifficultyBand]float64{
+		models.BandEasy: 0.1, models.BandMedium: 0.45, models.BandHard: 0.45,
+	}, 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[models.DifficultyBand]int{models.BandEasy: 2, models.BandMedium: 10, models.BandHard: 10}
+	for band, expected := range want {
+		if counts[band] != expected {
+			t.Errorf("count[%d] = %d, want %d", band, counts[band], expected)
+		}
+	}
+
+	counts, err = AllocateDifficultyCounts(map[models.DifficultyBand]float64{
+		models.BandEasy: 0.5, models.BandMedium: 0.5, models.BandHard: 0,
+	}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts[models.BandEasy] != 3 || counts[models.BandMedium] != 2 {
+		t.Fatalf("deterministic tie allocation = %#v, want easy=3 medium=2", counts)
+	}
+}
+
+func TestDifficultyTargetCountsPrefersExplicitCounts(t *testing.T) {
+	bp := &Blueprint{
+		DiffHist:              map[models.DifficultyBand]float64{models.BandEasy: 1, models.BandMedium: 0, models.BandHard: 0},
+		DiffCountQuota:        map[models.DifficultyBand]int{models.BandEasy: 1, models.BandMedium: 2, models.BandHard: 2},
+		DifficultyCountStrict: true,
+	}
+	counts := DifficultyTargetCounts(bp, 5)
+	if counts[models.BandEasy] != 1 || counts[models.BandMedium] != 2 || counts[models.BandHard] != 2 {
+		t.Fatalf("explicit target counts ignored: %#v", counts)
+	}
+}
 
 // TestLocalSearchTunesDifficultyHistogram pins the B-layer difficulty
 // behaviour: local search must rebalance the selection's band histogram
@@ -58,6 +96,32 @@ func TestLocalSearchTunesDifficultyHistogram(t *testing.T) {
 	}
 	if len(keys) != len(selection) {
 		t.Errorf("localSearch introduced duplicate candidates: %d unique keys for %d slots", len(keys), len(selection))
+	}
+}
+
+func TestLocalSearchTunesToExplicitDifficultyCounts(t *testing.T) {
+	o := New(nil, nil)
+	makeCandidate := func(i int, band models.DifficultyBand) candidateSpec {
+		return candidateSpec{
+			Type: models.TypeChoice, Points: []string{fmt.Sprintf("count_pt_%02d", i)},
+			DiffBand: band, Score: 2, Prior: 0.3,
+		}
+	}
+	pool := []candidateSpec{
+		makeCandidate(0, models.BandEasy), makeCandidate(1, models.BandEasy),
+		makeCandidate(2, models.BandHard), makeCandidate(3, models.BandHard),
+	}
+	selection := []candidateSpec{pool[0], pool[1]}
+	selection = o.localSearch(pool, selection, &Blueprint{
+		DiffHist:       map[models.DifficultyBand]float64{models.BandEasy: 0.5, models.BandHard: 0.5},
+		DiffCountQuota: map[models.DifficultyBand]int{models.BandEasy: 1, models.BandMedium: 0, models.BandHard: 1},
+	})
+	counts := map[models.DifficultyBand]int{}
+	for _, candidate := range selection {
+		counts[candidate.DiffBand]++
+	}
+	if counts[models.BandEasy] != 1 || counts[models.BandHard] != 1 {
+		t.Fatalf("explicit count target not reached: %#v", counts)
 	}
 }
 
@@ -128,6 +192,79 @@ func TestFixedCountTopUpUsesRealDisciplinePoints(t *testing.T) {
 	if len(options[2]) != 2 {
 		t.Fatalf("top-up cannot satisfy 2×5 quota: %#v", options)
 	}
+}
+
+func TestStrictDifficultyCandidatesKeepSyllabusBackedPoints(t *testing.T) {
+	used := make(map[string]bool)
+	points := nextSyntheticPointSet("高等数学", models.TypeChoice, used, 0)
+	if len(points) == 0 {
+		t.Fatal("nextSyntheticPointSet returned no candidate")
+	}
+	if issues := quality.SubjectContentIssues("数学二", points, ""); len(issues) > 0 {
+		t.Fatalf("synthetic high-math points failed syllabus validation: %v; points=%v", issues, points)
+	}
+	if disciplineForPoints(points) != "高等数学" {
+		t.Fatalf("synthetic candidate discipline = %q, want 高等数学: %v", disciplineForPoints(points), points)
+	}
+
+	catalogue := []candidateSpec{{
+		Type:   models.TypeChoice,
+		Points: []string{"高等数学", "一元函数微分学", "导数的计算"},
+		Score:  5,
+	}}
+	generated := augmentCellCandidates(nil, catalogue, models.TypeChoice, "高等数学", 5, 1, &Blueprint{})
+	if len(generated) == 0 {
+		t.Fatal("augmentCellCandidates returned no candidate")
+	}
+	if strings.Contains(strings.Join(generated[0].Points, "/"), "难度目标候选") {
+		t.Fatalf("real syllabus catalogue was skipped in favour of a synthetic marker: %v", generated[0].Points)
+	}
+	seen := make(map[string]bool)
+	for _, candidate := range generated {
+		key := candidateKey(candidate)
+		if seen[key] {
+			t.Fatalf("difficulty augmentation duplicated a knowledge-point set: %v", candidate.Points)
+		}
+		seen[key] = true
+	}
+}
+
+func TestDifficultySelectionTieBreakIsDeterministic(t *testing.T) {
+	candidates := []models.PastQuestion{
+		{Type: models.TypeChoice, Points: []string{"高等数学", "极限", "点A"}, Score: 5, Difficulty: 0.2},
+		{Type: models.TypeChoice, Points: []string{"高等数学", "导数", "点B"}, Score: 5, Difficulty: 0.2},
+		{Type: models.TypeChoice, Points: []string{"高等数学", "积分", "点C"}, Score: 5, Difficulty: 0.5},
+		{Type: models.TypeChoice, Points: []string{"高等数学", "极限", "点D"}, Score: 5, Difficulty: 0.5},
+	}
+	bp := &Blueprint{
+		Subject: "数学二", TotalScore: 10,
+		TypeQuota:             map[models.QuestionType]float64{models.TypeChoice: 10},
+		TypeCountQuota:        map[models.QuestionType]int{models.TypeChoice: 2},
+		DiffHist:              map[models.DifficultyBand]float64{models.BandEasy: 0.5, models.BandMedium: 0.5, models.BandHard: 0},
+		DiffCountQuota:        map[models.DifficultyBand]int{models.BandEasy: 1, models.BandMedium: 1, models.BandHard: 0},
+		DifficultyCountStrict: true, NumQuestions: 2,
+	}
+	first, err := New(nil, nil).Compose(context.Background(), bp, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for run := 0; run < 5; run++ {
+		got, err := New(nil, nil).Compose(context.Background(), bp, candidates)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if selectionKeyFromSpec(got) != selectionKeyFromSpec(first) {
+			t.Fatalf("run %d selected a different spec: %s vs %s", run, selectionKeyFromSpec(got), selectionKeyFromSpec(first))
+		}
+	}
+}
+
+func selectionKeyFromSpec(spec *models.SpecTable) string {
+	keys := make([]string, 0, len(spec.Entries))
+	for _, entry := range spec.Entries {
+		keys = append(keys, fmt.Sprintf("%s|%s|%.1f|%d", entry.Type, strings.Join(entry.Points, ","), entry.Score, entry.DiffBand))
+	}
+	return strings.Join(keys, "\x00")
 }
 
 func TestComposeEnforcesDisciplineQuotasAndOrder(t *testing.T) {

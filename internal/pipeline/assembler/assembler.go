@@ -365,6 +365,24 @@ func (a *Assembler) renderAnswerSheet(paper models.ExamPaper) string {
 func (a *Assembler) renderSpecTable(paper models.ExamPaper, specMap map[string]models.SpecEntry) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("# 双向细目表 — %s (总分: %.0f)\n\n", paper.Subject, paper.TotalScore))
+	targetCounts := make(map[models.DifficultyBand]int)
+	if len(paper.SpecTable.DifficultyTarget) > 0 {
+		for band, count := range paper.SpecTable.DifficultyTarget {
+			targetCounts[band] = count
+		}
+	}
+	actualCounts := make(map[models.DifficultyBand]int)
+	for _, q := range paper.Questions {
+		if len(paper.SpecTable.DifficultyTarget) == 0 {
+			if spec, ok := specMap[q.SpecID]; ok {
+				targetCounts[spec.DiffBand]++
+			}
+		}
+		actualCounts[bandFromDifficulty(q.Difficulty)]++
+	}
+	b.WriteString(fmt.Sprintf("难度题数目标：易 %d / 中 %d / 难 %d；实际：易 %d / 中 %d / 难 %d。\n\n",
+		targetCounts[models.BandEasy], targetCounts[models.BandMedium], targetCounts[models.BandHard],
+		actualCounts[models.BandEasy], actualCounts[models.BandMedium], actualCounts[models.BandHard]))
 	b.WriteString("| 序号 | 题型 | 知识点 | 认知层 | 难度band | 目标难度 | 实测难度 | 分值 |\n")
 	b.WriteString("|------|------|--------|--------|----------|----------|----------|------|\n")
 
@@ -383,6 +401,10 @@ func (a *Assembler) renderSpecTable(paper models.ExamPaper, specMap map[string]m
 	}
 
 	return b.String()
+}
+
+func bandFromDifficulty(difficulty float64) models.DifficultyBand {
+	return models.BandFromDifficulty(difficulty)
 }
 
 // --- Helpers ---

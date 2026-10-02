@@ -81,6 +81,15 @@ make build
 # 生成数学二并编译 PDF
 ./bin/got0genpaper generate --subject "数学二" --compile
 
+# 使用难度预设：easy、medium、hard
+./bin/got0genpaper generate --subject "数学二" --difficulty hard --compile
+
+# 自定义易、中、难比例（比例之和必须为 1）
+./bin/got0genpaper generate --subject "数学二" --difficulty-hist 0.2,0.6,0.2
+
+# 精确指定数学二 22 题的难度题数：易 2、中 10、难 10
+./bin/got0genpaper generate --subject "数学二" --difficulty-counts 2,10,10
+
 # 明确禁止自动修复，只生成并校验首轮结果
 ./bin/got0genpaper generate --subject "数学二" --max-repair-rounds 0
 
@@ -92,6 +101,29 @@ make build
 ```
 
 完整生成会对多道题分别调用模型，可能耗时较长并产生费用。请先用 `test-provider` 确认 endpoint、key 和模型权限，再开始生成。
+
+### 难度控制
+
+`--difficulty` 控制生成前的难度分布预设：
+
+- `default`：使用科目默认分布；数学二当前为易 10%、中 45%、难 45%。这是软目标，组卷会尽量接近。
+- `easy`：易 50%、中 40%、难 10%。
+- `medium`：易 20%、中 60%、难 20%。
+- `hard`：易 10%、中 45%、难 45%。
+
+除 `default` 外的预设都是严格目标：组卷和校验都会按最大余数法得到的整数题数执行。
+
+需要按比例控制时使用 `--difficulty-hist easy,medium,hard`，例如
+`--difficulty-hist 0.2,0.6,0.2`。也支持命名形式
+`easy=0.2,medium=0.6,hard=0.2`。比例之和必须为 1；程序会用最大余数法把比例转换为整数题数。
+
+需要精确指定题数时使用 `--difficulty-counts`，例如数学二的
+`--difficulty-counts 2,10,10`，也支持
+`easy=2,medium=10,hard=10`。题数之和必须等于该科目的固定题数；数学二为 22。
+`--difficulty-hist` 与 `--difficulty-counts` 不能同时使用，二者也不能与非默认
+`--difficulty` 同时使用。
+
+最终目标题数、实际题数、比例和严格标记会写入 `data/blueprint.json`、`data/spec_table.json`、`output/spec_table.md` 和生成命令的 JSON 输出中。严格目标下，校验结果中的 `difficultyCountsTarget` 与 `difficultyCountsActual` 必须一致，`difficultyOK` 才会通过；默认软目标只按比例偏差和 KL 阈值判断。
 
 ## 5. 编译和查看产物
 

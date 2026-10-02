@@ -4,9 +4,11 @@ import (
 	"context"
 	"math"
 	"os"
+	"reflect"
 	"testing"
 
 	"GoT0GenPaper/internal/models"
+	"GoT0GenPaper/internal/pipeline/orchestrator"
 )
 
 func TestSelectableSubjectProfiles(t *testing.T) {
@@ -129,6 +131,143 @@ func TestSubjectSourcesMatchBundledData(t *testing.T) {
 func TestBlueprintForSubjectRejectsUnknownSubject(t *testing.T) {
 	if _, err := blueprintForSubject("math3"); err == nil {
 		t.Fatal("blueprintForSubject(math3) accepted an unselectable subject")
+	}
+}
+
+func TestDifficultyPresetsAndHistogramOverrides(t *testing.T) {
+	tests := []struct {
+		name   string
+		preset string
+		raw    string
+		want   map[models.DifficultyBand]float64
+	}{
+		{name: "subject default", want: map[models.DifficultyBand]float64{models.BandEasy: 0.1, models.BandMedium: 0.45, models.BandHard: 0.45}},
+		{name: "easy", preset: "easy", want: map[models.DifficultyBand]float64{models.BandEasy: 0.5, models.BandMedium: 0.4, models.BandHard: 0.1}},
+		{name: "medium", preset: "medium", want: map[models.DifficultyBand]float64{models.BandEasy: 0.2, models.BandMedium: 0.6, models.BandHard: 0.2}},
+		{name: "hard", preset: "hard", want: map[models.DifficultyBand]float64{models.BandEasy: 0.1, models.BandMedium: 0.45, models.BandHard: 0.45}},
+		{name: "numeric", raw: "0.2,0.6,0.2", want: map[models.DifficultyBand]float64{models.BandEasy: 0.2, models.BandMedium: 0.6, models.BandHard: 0.2}},
+		{name: "named", raw: "hard=0.2,easy=0.3,medium=0.5", want: map[models.DifficultyBand]float64{models.BandEasy: 0.3, models.BandMedium: 0.5, models.BandHard: 0.2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bp, err := blueprintForSubjectConfigured("数学二", tt.preset, tt.raw)
+			if err != nil {
+				t.Fatalf("blueprintForSubjectConfigured: %v", err)
+			}
+			for band, want := range tt.want {
+				if math.Abs(bp.DiffHist[band]-want) > 1e-9 {
+					t.Errorf("DiffHist[%d] = %.3f, want %.3f", band, bp.DiffHist[band], want)
+				}
+			}
+		})
+	}
+}
+
+func TestDifficultyHistogramValidation(t *testing.T) {
+	for _, raw := range []string{"0.2,0.2,0.2", "0.2,0.8", "easy=0.2,medium=0.8,hard=0.1", "unknown=1,medium=0,hard=0"} {
+		if _, err := parseDifficultyHistogram(raw); err == nil {
+			t.Errorf("parseDifficultyHistogram(%q) accepted invalid input", raw)
+		}
+		if _, err := blueprintForSubjectDifficulty("数学二", "", raw, ""); err == nil {
+			t.Errorf("blueprintForSubjectDifficulty accepted invalid histogram %q", raw)
+		}
+	}
+	if _, err := blueprintForSubjectConfigured("数学二", "hard", "0.2,0.6,0.2"); err == nil {
+		t.Fatal("difficulty preset and histogram were accepted together")
+	}
+}
+
+func TestDifficultyStrictnessIsExplicit(t *testing.T) {
+	defaultBlueprint, err := blueprintForSubjectDifficulty("数学二", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultBlueprint.DifficultyCountStrict {
+		t.Fatal("subject default unexpectedly enabled strict difficulty counts")
+	}
+
+	for name, configure := range map[string]func() (orchestrator.Blueprint, error){
+		"preset": func() (orchestrator.Blueprint, error) {
+			return blueprintForSubjectDifficulty("数学二", "medium", "", "")
+		},
+		"histogram": func() (orchestrator.Blueprint, error) {
+			return blueprintForSubjectDifficulty("数学二", "", "0.2,0.6,0.2", "")
+		},
+		"counts": func() (orchestrator.Blueprint, error) {
+			return blueprintForSubjectDifficulty("数学二", "", "", "2,10,10")
+		},
+	} {
+		bp, err := configure()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !bp.DifficultyCountStrict {
+			t.Errorf("%s did not enable strict difficulty counts", name)
+		}
+	}
+}
+
+func TestDifficultyCountsAreExactAndDerivedFromRatios(t *testing.T) {
+	fromRatio, err := blueprintForSubjectDifficulty("数学二", "", "0.1,0.45,0.45", "")
+	if err != nil {
+		t.Fatalf("ratio blueprint: %v", err)
+	}
+	want := map[models.DifficultyBand]int{models.BandEasy: 2, models.BandMedium: 10, models.BandHard: 10}
+	if !reflect.DeepEqual(fromRatio.DiffCountQuota, want) {
+		t.Fatalf("ratio counts = %#v, want %#v", fromRatio.DiffCountQuota, want)
+	}
+
+	explicit, err := blueprintForSubjectDifficulty("数学二", "", "", "easy=1,medium=8,hard=13")
+	if err != nil {
+		t.Fatalf("explicit blueprint: %v", err)
+	}
+	if !reflect.DeepEqual(explicit.DiffCountQuota, map[models.DifficultyBand]int{
+		models.BandEasy: 1, models.BandMedium: 8, models.BandHard: 13,
+	}) {
+		t.Fatalf("explicit counts = %#v", explicit.DiffCountQuota)
+	}
+	if math.Abs(explicit.DiffHist[models.BandEasy]-1.0/22.0) > 1e-9 {
+		t.Fatalf("explicit histogram was not derived from counts: %#v", explicit.DiffHist)
+	}
+}
+
+func TestDifficultyCountsValidation(t *testing.T) {
+	for _, raw := range []string{"1,2,3", "easy=2,medium=10,hard=9", "easy=-1,medium=10,hard=13", "easy=2,medium=10,hard=10,extra=0"} {
+		if _, err := blueprintForSubjectDifficulty("数学二", "", "", raw); err == nil {
+			t.Errorf("blueprintForSubjectDifficulty accepted invalid counts %q", raw)
+		}
+	}
+	if _, err := blueprintForSubjectDifficulty("数学二", "medium", "", "2,10,10"); err == nil {
+		t.Fatal("difficulty preset and explicit counts were accepted together")
+	}
+}
+
+func TestMath2CompositionUsesDifficultyTargets(t *testing.T) {
+	a := newTestAPI(t)
+	profile, _ := subjectProfile("math2")
+	parsed, err := a.parser.Parse(context.Background(), repoPath("data", profile.Source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bp, err := blueprintForSubjectDifficulty("数学二", "", "0.1,0.45,0.45", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := a.orch.Compose(context.Background(), &bp, parsed.Questions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[models.DifficultyBand]int)
+	for _, entry := range spec.Entries {
+		counts[entry.DiffBand]++
+	}
+	for band, want := range bp.DiffCountQuota {
+		if counts[band] != want {
+			t.Errorf("composed difficulty band %d count = %d, want %d (all=%v)", band, counts[band], want, counts)
+		}
+	}
+	if !reflect.DeepEqual(spec.DifficultyTarget, bp.DiffCountQuota) {
+		t.Errorf("spec difficulty target = %#v, want %#v", spec.DifficultyTarget, bp.DiffCountQuota)
 	}
 }
 

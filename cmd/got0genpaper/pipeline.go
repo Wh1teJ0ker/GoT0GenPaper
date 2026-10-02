@@ -303,41 +303,15 @@ func (a *API) repairPaper(ctx context.Context, paper models.ExamPaper, bp *orche
 		}
 
 		// Re-generate only the violated spec slots.
-		specByID := make(map[string]models.SpecEntry, len(paper.SpecTable.Entries))
-		for _, e := range paper.SpecTable.Entries {
-			specByID[e.ID] = e
-		}
-		repaired := false
-		for _, sid := range val.ViolatedSpecIDs {
-			entry, ok := specByID[sid]
-			if !ok {
-				continue
-			}
-			nq, err := a.gen.Generate(ctx, entry)
-			if err != nil {
-				continue
-			}
-			// Re-produce answer + rubric for the replacement question.
-			if review, err := a.ans.ProduceAnswer(ctx, nq); err == nil && review != nil {
-				a.replaceRubric(&paper, review.Rubric)
-				if !review.Finalised {
-					nq.Status = "needs_review"
-					nq.Warnings = append(nq.Warnings, "修复后的标准答案未完成独立校验")
-				}
-			} else {
-				nq.Status = "needs_review"
-				nq.Warnings = append(nq.Warnings, "修复后的标准答案生成失败，需人工复核")
-			}
-			if replaceQuestionForSpec(&paper, sid, nq) {
-				repaired = true
-			}
+		repaired := a.regenerateSlots(ctx, &paper, val.ViolatedSpecIDs)
+		if repaired {
+			paper.Questions = orderQuestionsBySpec(paper.Questions, paper.SpecTable.Entries)
+			paper.TotalScore = sumPaperQuestionScores(paper.Questions)
 		}
 		if !repaired {
 			// Nothing could be regenerated — degrade with last validation.
 			return paper, lastVal, round + 1, nil
 		}
-		paper.Questions = orderQuestionsBySpec(paper.Questions, paper.SpecTable.Entries)
-		paper.TotalScore = sumPaperQuestionScores(paper.Questions)
 	}
 
 	// Final validation after exhausting repair rounds.
@@ -346,6 +320,49 @@ func (a *API) repairPaper(ctx context.Context, paper models.ExamPaper, bp *orche
 		return paper, lastVal, maxRounds, err
 	}
 	return paper, val, maxRounds, nil
+}
+
+// regenerateSlots re-generates only the requested spec entries and replaces
+// their matching questions/rubrics in place. The paper order and all other
+// questions remain unchanged.
+func (a *API) regenerateSlots(ctx context.Context, paper *models.ExamPaper, specIDs []string) bool {
+	if paper == nil || len(specIDs) == 0 {
+		return false
+	}
+	specByID := make(map[string]models.SpecEntry, len(paper.SpecTable.Entries))
+	for _, entry := range paper.SpecTable.Entries {
+		specByID[entry.ID] = entry
+	}
+	repaired := false
+	seen := make(map[string]bool, len(specIDs))
+	for _, sid := range specIDs {
+		if seen[sid] {
+			continue
+		}
+		seen[sid] = true
+		entry, ok := specByID[sid]
+		if !ok {
+			continue
+		}
+		nq, err := a.gen.Generate(ctx, entry)
+		if err != nil {
+			continue
+		}
+		if review, err := a.ans.ProduceAnswer(ctx, nq); err == nil && review != nil {
+			a.replaceRubric(paper, review.Rubric)
+			if !review.Finalised {
+				nq.Status = "needs_review"
+				nq.Warnings = append(nq.Warnings, "修复后的标准答案未完成独立校验")
+			}
+		} else {
+			nq.Status = "needs_review"
+			nq.Warnings = append(nq.Warnings, "修复后的标准答案生成失败，需人工复核")
+		}
+		if replaceQuestionForSpec(paper, sid, nq) {
+			repaired = true
+		}
+	}
+	return repaired
 }
 
 // replaceQuestionForSpec replaces a generated question in place, or appends a

@@ -175,7 +175,15 @@ func (g *Generator) finish(spec models.SpecEntry, resp generationResponse) (mode
 	if math.IsNaN(q.Difficulty) || math.IsInf(q.Difficulty, 0) || q.Difficulty <= 0 || q.Difficulty > 1 {
 		q.Difficulty = bandToFloat(spec.DiffBand)
 		q.Warnings = append(q.Warnings, "模型未提供有效难度，已使用目标难度估计")
-		q.Status = "needs_review"
+	}
+	// Self-reported difficulty is useful as a signal, but models frequently
+	// collapse every item to 0.5. Keep the paper's requested difficulty
+	// distribution stable by snapping an out-of-band estimate to the target
+	// band's center; the prompt still asks the model to make the mathematics
+	// itself match that band.
+	if calibrated := calibrateDifficulty(spec.DiffBand, q.Difficulty); calibrated != q.Difficulty {
+		q.Warnings = append(q.Warnings, fmt.Sprintf("模型难度 %.2f 偏离题位目标，已校准为 %.2f", q.Difficulty, calibrated))
+		q.Difficulty = calibrated
 	}
 	if blankOrPlaceholder(q.Stem) || blankOrPlaceholder(q.Answer) {
 		q.Status = "needs_review"
@@ -216,6 +224,25 @@ func (g *Generator) finish(spec models.SpecEntry, resp generationResponse) (mode
 
 func answerChoiceLabels(raw string) []string {
 	return choice.Parse(raw)
+}
+
+func calibrateDifficulty(band models.DifficultyBand, value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return bandToFloat(band)
+	}
+	low, high := 0.0, 1.0
+	switch band {
+	case models.BandEasy:
+		high = 0.34
+	case models.BandMedium:
+		low, high = 0.35, 0.64
+	case models.BandHard:
+		low = 0.65
+	}
+	if value < low || value > high {
+		return bandToFloat(band)
+	}
+	return value
 }
 
 func finitePositive(value float64) bool {
@@ -330,12 +357,12 @@ func (g *Generator) buildSystemPrompt(spec models.SpecEntry) string {
 		answerRule = "多选题必须有至少两个正确选项，答案可写成 A,C 或 AC"
 	}
 	typeRule := questionFormatRule(spec.Type)
-	return fmt.Sprintf(`你是一个考研命题专家。你需要根据以下规格生成一道完整的考研真题:
+	return fmt.Sprintf(`你是一个考研命题专家。你需要根据以下规格生成一道完整、可独立作答且经过验算的考研模拟题:
 
 题型: %s
 知识点: %s
 认知层次(Bloom): %s
-难度目标: %s (band %d)
+难度目标: %s (band %d，数值必须落在该区间)
 分值: %.0f
 
 要求:
@@ -345,9 +372,10 @@ func (g *Generator) buildSystemPrompt(spec models.SpecEntry) string {
 4. 认知层次必须匹配 (%s) — 不要用记忆题代替应用题
 5. 选择题必须提供4个互不重复且非空的选项 (A/B/C/D); %s
 6. 必须严格使用题型对应格式：%s
-7. 参考答案必须完整但简洁，给出必要步骤；返回前必须重新代入、求导或验算结论，确保答案与推导及选项完全一致；选择题答案首句必须明确写“答案：A/B/C/D”；不要重复题面，不要输出无关说明
-8. 题目必须自洽且信息足以确定答案；如果题面出现多分支、初值不足或问题形式与解法不匹配，先调整题面使其严密，再输出。禁止在答案中写“题目有误”“假设题意”“修正”“重新审视”“如果题目要求”等自我纠错或不确定性说明
-9. 以JSON格式返回且只返回这4个字段: {"stem": "LaTeX题面", "options": ["选项A", "选项B", "选项C", "选项D"], "answer": "答案与解析", "difficulty": 0.5}`,
+7. 参考答案必须完整但简洁，给出必要步骤；返回前必须独立复核题面条件、计算、选项和最终结论，确保答案与推导及选项完全一致；选择题答案首句必须明确写“答案：A/B/C/D”；不要重复题面，不要输出无关说明
+8. 题目必须自洽且信息足以确定答案；禁止在答案中写“题目有误”“假设题意”“修改题面”“重新审视”“如果题目要求”等自我纠错或不确定性说明。若草稿发现条件矛盾，直接重新设计一道自洽的新题后再输出
+9. 难度数值必须服从区间：易为 [0.00,0.34]，中为 [0.35,0.64]，难为 [0.65,1.00]；不要把所有题都填写为 0.5
+10. 以JSON格式返回且只返回这4个字段: {"stem": "LaTeX题面", "options": ["选项A", "选项B", "选项C", "选项D"], "answer": "答案与解析", "difficulty": 0.75}`,
 		typeDesc,
 		strings.Join(spec.Points, ", "),
 		cogDesc,

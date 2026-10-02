@@ -6,7 +6,7 @@
 [![LaTeX](https://img.shields.io/badge/output-LaTeX-008080?style=flat)](https://www.latex-project.org/)
 [![Vision LLM](<https://img.shields.io/badge/grading-Vision%20LLM-7C3AED?style=flat>)](#扫描答题卡批改)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f?style=flat)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.0-3b82f6?style=flat)](VERSION)
+[![Version](https://img.shields.io/badge/version-0.1.1-3b82f6?style=flat)](VERSION)
 
 基于预测知识点，调用大模型生成一套可以打印的考研模拟试卷。
 
@@ -104,6 +104,15 @@ make build
 
 ```bash
 ./bin/got0genpaper generate --subject "数学二" --compile
+
+# 使用预设难度
+./bin/got0genpaper generate --subject "数学二" --difficulty hard --compile
+
+# 自定义易、中、难比例（比例之和必须为 1）
+./bin/got0genpaper generate --subject "数学二" --difficulty-hist 0.2,0.6,0.2
+
+# 精确指定 22 题中的难度题数：易 2、中 10、难 10
+./bin/got0genpaper generate --subject "数学二" --difficulty-counts 2,10,10
 ```
 
 这条命令会完成题目生成、答案生成、评分标准生成、质量校验，并在最后尝试编译 PDF。
@@ -137,6 +146,18 @@ make build
 # 最多进行两轮整卷修复
 ./bin/got0genpaper generate --subject "数学二" --max-repair-rounds 2
 ```
+
+#### 难度怎么调
+
+`--difficulty` 可选 `default`、`easy`、`medium`、`hard`。数学二默认是易 10%、中 45%、难 45%；默认分布属于软目标，组卷会尽量接近。
+
+如果希望明确控制难度，可以按比例或题数指定：
+
+- 比例：`--difficulty-hist 0.2,0.6,0.2`，顺序为易、中、难，比例和必须为 1。程序用最大余数法换算成整数题数。
+- 题数：`--difficulty-counts 2,10,10`，也可写成 `easy=2,medium=10,hard=10`；总数必须等于该科目的题数。
+- 预设 `easy`、`medium`、`hard` 与上面两种自定义方式一样，都是严格目标；实际易、中、难题数必须完全匹配。
+
+自定义比例或题数不能与非默认的 `--difficulty` 同时使用，比例和题数也不能同时指定。目标、实际分布和严格标记会写入组卷结果及校验报告。
 
 完整组卷会调用模型多次，耗时和费用取决于模型服务、题目数量和修复轮数。正式生成前，建议先运行 `test-provider`。
 
@@ -348,7 +369,7 @@ bin/                    本地构建产物
 
 ## 版本和发布
 
-当前准备发布版本为 `0.1.0`，项目版本由根目录 `VERSION` 文件管理。本地构建时通过 `Makefile` 注入 CLI：
+当前源码版本为 `0.1.1`，项目版本由根目录 `VERSION` 文件管理。本地构建时通过 `Makefile` 注入 CLI：
 
 ```bash
 make version
@@ -356,14 +377,14 @@ make version
 
 正式发布使用 `vX.Y.Z` Git 标签。推送标签后，GitHub Actions 会自动测试代码，构建 Linux、macOS 和 Windows 版本，打包并创建 GitHub Release，同时附带 SHA-256 校验文件。
 
-例如发布 `0.1.0`：
+`v0.1.1` 增加难度预设、比例和精确题数配置，并将难度目标贯通到组卷、校验及细目表。默认科目分布保持软目标，用户显式配置后按严格目标执行。
+
+发布前先审阅工作区，确保源码、测试和文档都已提交；不要把 `config.toml`、`output/`、`tmp/` 或本地密钥加入版本控制。推送 `main` 后，再推送版本标签触发发布：
 
 ```bash
-git add VERSION README.md LICENSE
-git commit -m "release: v0.1.0"
-git tag -a v0.1.0 -m "GoT0GenPaper v0.1.0"
+git tag -a v0.1.1 -m "GoT0GenPaper v0.1.1"
 git push origin main
-git push origin v0.1.0
+git push origin v0.1.1
 ```
 
 Release 页面会自动提供各平台的 `.tar.gz` 或 `.zip` 安装包。完整流程见 [`docs/CI-CD.md`](docs/CI-CD.md)。

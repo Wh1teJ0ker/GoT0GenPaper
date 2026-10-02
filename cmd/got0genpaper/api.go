@@ -284,6 +284,18 @@ func (a *API) BlueprintForSubject(subject string) (orchestrator.Blueprint, error
 	return blueprintForSubject(subject)
 }
 
+// BlueprintForSubjectWithDifficulty returns a subject blueprint with an
+// optional named preset or explicit easy,medium,hard histogram override.
+func (a *API) BlueprintForSubjectWithDifficulty(subject, preset, histogram string) (orchestrator.Blueprint, error) {
+	return blueprintForSubjectConfigured(subject, preset, histogram)
+}
+
+// BlueprintForSubjectWithDifficultyConfig exposes both ratio and exact-count
+// difficulty controls to non-CLI callers.
+func (a *API) BlueprintForSubjectWithDifficultyConfig(subject, preset, histogram, counts string) (orchestrator.Blueprint, error) {
+	return blueprintForSubjectDifficulty(subject, preset, histogram, counts)
+}
+
 // --- Stage [4]: 逐题生成 ---
 
 // GenerateQuestions runs the LLM generator on a spec table.
@@ -363,6 +375,47 @@ func (a *API) RepairPaper(paper models.ExamPaper, maxRounds int) (*RepairOutput,
 		return nil, err
 	}
 	return &RepairOutput{Paper: p, Rounds: rounds, Validation: val}, nil
+}
+
+// RepairStoredPaper repairs selected entries in the existing assembled paper.
+// It intentionally skips parsing, composition, and regeneration of untouched
+// questions so a small fix does not invalidate a whole paper.
+func (a *API) RepairStoredPaper(specIDs []string) (*RepairOutput, error) {
+	if err := a.storageReady(); err != nil {
+		return nil, err
+	}
+	paper, err := a.LoadStoredPaper()
+	if err != nil {
+		return nil, err
+	}
+	var bp orchestrator.Blueprint
+	if err := a.store.LoadDataJSON("blueprint", &bp); err != nil {
+		return nil, fmt.Errorf("读取 blueprint: %w", err)
+	}
+	a.lastBlueprint = &bp
+	if len(specIDs) == 0 {
+		val, validateErr := a.validator.Validate(a.ctx, *paper, &bp)
+		if validateErr != nil {
+			return nil, validateErr
+		}
+		specIDs = val.ViolatedSpecIDs
+	}
+	if !a.regenerateSlots(a.ctx, paper, specIDs) {
+		return nil, fmt.Errorf("没有成功修复指定题位: %s", strings.Join(specIDs, ", "))
+	}
+	paper.Questions = orderQuestionsBySpec(paper.Questions, paper.SpecTable.Entries)
+	paper.TotalScore = sumPaperQuestionScores(paper.Questions)
+	val, err := a.validator.Validate(a.ctx, *paper, &bp)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.store.SaveDataJSON("generated_questions", paper.Questions); err != nil {
+		return nil, fmt.Errorf("同步 generated_questions: %w", err)
+	}
+	if _, err := a.AssemblePaper(*paper); err != nil {
+		return nil, err
+	}
+	return &RepairOutput{Paper: *paper, Rounds: 1, Validation: val}, nil
 }
 
 // --- Stage [7]: 装配 ---

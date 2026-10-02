@@ -42,6 +42,33 @@ func TestFinishMarksMalformedChoiceForReview(t *testing.T) {
 	}
 }
 
+func TestFinishCalibratesDifficultyToRequestedBand(t *testing.T) {
+	g := New(nil, nil)
+	for _, tc := range []struct {
+		name  string
+		band  models.DifficultyBand
+		value float64
+		want  float64
+	}{
+		{name: "easy", band: models.BandEasy, value: 0.8, want: 0.25},
+		{name: "medium", band: models.BandMedium, value: 0.2, want: 0.5},
+		{name: "hard", band: models.BandHard, value: 0.5, want: 0.75},
+		{name: "in band", band: models.BandHard, value: 0.9, want: 0.9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, err := g.finish(models.SpecEntry{ID: tc.name, Type: models.TypeMajor, Score: 10, DiffBand: tc.band}, generationResponse{
+				Stem: "完整题面", Answer: "完整答案", Difficulty: tc.value,
+			})
+			if err != nil {
+				t.Fatalf("finish: %v", err)
+			}
+			if q.Difficulty != tc.want {
+				t.Errorf("difficulty = %.2f, want %.2f", q.Difficulty, tc.want)
+			}
+		})
+	}
+}
+
 func TestGenerateRejectsInvalidSpec(t *testing.T) {
 	g := New(nil, nil)
 	if _, err := g.Generate(nil, models.SpecEntry{ID: "", Type: models.TypeChoice, Score: 2}); err == nil {

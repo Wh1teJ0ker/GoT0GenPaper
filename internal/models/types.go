@@ -78,9 +78,24 @@ type SpecEntry struct {
 
 // SpecTable is the CP-SAT output — the blueprint before generation.
 type SpecTable struct {
-	Entries    []SpecEntry `json:"entries"`
-	TotalScore float64     `json:"totalScore"`
-	Subject    string      `json:"subject"`
+	Entries                []SpecEntry            `json:"entries"`
+	TotalScore             float64                `json:"totalScore"`
+	Subject                string                 `json:"subject"`
+	DifficultyTarget       map[DifficultyBand]int `json:"difficultyTarget,omitempty"`
+	DifficultyTargetStrict bool                   `json:"difficultyTargetStrict,omitempty"`
+}
+
+// BandFromDifficulty is the single conversion used by historical-question
+// annotations, generated outputs, validation, and report rendering.
+func BandFromDifficulty(value float64) DifficultyBand {
+	switch {
+	case value < 0.35:
+		return BandEasy
+	case value < 0.65:
+		return BandMedium
+	default:
+		return BandHard
+	}
 }
 
 // GeneratedQuestion is a question produced by the LLM generator.

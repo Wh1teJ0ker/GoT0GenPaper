@@ -1,6 +1,9 @@
 GO ?= go
 BIN := bin/got0genpaper
 SUBJECT ?= 408
+DIFFICULTY ?= default
+DIFFICULTY_HIST ?=
+DIFFICULTY_COUNTS ?=
 VERSION_FILE ?= VERSION
 VERSION ?= $(shell if test -f "$(VERSION_FILE)"; then tr -d '[:space:]' < "$(VERSION_FILE)"; else echo dev; fi)
 LDFLAGS ?= -s -w -X main.version=$(VERSION)
@@ -17,7 +20,8 @@ help:
 	@echo 'make build      Build bin/got0genpaper'
 	@echo 'make check      Run format, module, test, vet, and build checks'
 	@echo 'make selftest   Check local runtime and data dependencies'
-	@echo 'make generate SUBJECT="数学二"  Generate a paper (uses the configured LLM)'
+	@echo 'make generate SUBJECT="数学二" DIFFICULTY=hard  Generate a paper (uses the configured LLM)'
+	@echo 'make generate SUBJECT="数学二" DIFFICULTY_COUNTS=2,10,10  Use exact difficulty counts'
 	@echo 'make pdf        Compile output/*.tex into PDFs'
 	@echo 'make version    Print the local binary version'
 
@@ -40,7 +44,7 @@ selftest: build
 	./$(BIN) test
 
 generate: build
-	./$(BIN) generate --subject "$(SUBJECT)"
+	./$(BIN) generate --subject "$(SUBJECT)" --difficulty "$(DIFFICULTY)" --difficulty-hist "$(DIFFICULTY_HIST)" --difficulty-counts "$(DIFFICULTY_COUNTS)"
 
 pdf: build
 	./$(BIN) compile

@@ -43,20 +43,22 @@ func New(pastDB []models.PastQuestion) *Validator {
 
 // ValidationResult reports per-check pass/fail.
 type ValidationResult struct {
-	StructureOK     bool     `json:"structureOK"`
-	StructureIssues []string `json:"structureIssues,omitempty"`
-	ContentReady    bool     `json:"contentReady"`
-	ContentIssues   []string `json:"contentIssues,omitempty"`
-	CoverageOK      bool     `json:"coverageOK"`
-	DifficultyOK    bool     `json:"difficultyOK"`
-	NoDuplicates    bool     `json:"noDuplicates"`
-	ScoreTotalOK    bool     `json:"scoreTotalOK"`
-	ViolatedSpecIDs []string `json:"violatedSpecIds"`
-	KL              float64  `json:"kl"` // difficulty histogram KL divergence
-	DuplicatePairs  []string `json:"duplicatePairs"`
-	MissingPoints   []string `json:"missingPoints"`
-	ScoreActual     float64  `json:"scoreActual"`
-	ScoreExpected   float64  `json:"scoreExpected"`
+	StructureOK            bool           `json:"structureOK"`
+	StructureIssues        []string       `json:"structureIssues,omitempty"`
+	ContentReady           bool           `json:"contentReady"`
+	ContentIssues          []string       `json:"contentIssues,omitempty"`
+	CoverageOK             bool           `json:"coverageOK"`
+	DifficultyOK           bool           `json:"difficultyOK"`
+	DifficultyCountsTarget map[string]int `json:"difficultyCountsTarget,omitempty"`
+	DifficultyCountsActual map[string]int `json:"difficultyCountsActual,omitempty"`
+	NoDuplicates           bool           `json:"noDuplicates"`
+	ScoreTotalOK           bool           `json:"scoreTotalOK"`
+	ViolatedSpecIDs        []string       `json:"violatedSpecIds"`
+	KL                     float64        `json:"kl"` // difficulty histogram KL divergence
+	DuplicatePairs         []string       `json:"duplicatePairs"`
+	MissingPoints          []string       `json:"missingPoints"`
+	ScoreActual            float64        `json:"scoreActual"`
+	ScoreExpected          float64        `json:"scoreExpected"`
 }
 
 // Validate runs all whole-paper checks.
@@ -135,7 +137,28 @@ func (v *Validator) Validate(ctx context.Context, paper models.ExamPaper, bp int
 	}
 	kl := klDivergence(actualDist, targetDist)
 	result.KL = kl
-	result.DifficultyOK = len(paper.Questions) > 0 && kl < KLEpsilon
+	actualCounts := map[models.DifficultyBand]int{
+		models.BandEasy:   bandCounts[models.BandEasy],
+		models.BandMedium: bandCounts[models.BandMedium],
+		models.BandHard:   bandCounts[models.BandHard],
+	}
+	targetCounts := map[models.DifficultyBand]int(nil)
+	difficultyTargetStrict := paper.SpecTable.DifficultyTargetStrict
+	if blueprint, ok := bp.(*orchestrator.Blueprint); ok && blueprint != nil {
+		targetCounts = orchestrator.DifficultyTargetCounts(blueprint, len(paper.Questions))
+		difficultyTargetStrict = blueprint.DifficultyCountStrict
+	}
+	if len(targetCounts) == 0 && len(paper.SpecTable.DifficultyTarget) > 0 {
+		targetCounts = paper.SpecTable.DifficultyTarget
+	}
+	if len(targetCounts) == 0 {
+		fallback, _ := orchestrator.AllocateDifficultyCounts(targetDist, len(paper.Questions))
+		targetCounts = fallback
+	}
+	result.DifficultyCountsActual = difficultyCountView(actualCounts)
+	result.DifficultyCountsTarget = difficultyCountView(targetCounts)
+	countsMatch := !difficultyTargetStrict || len(targetCounts) == 0 || countsEqual(actualCounts, targetCounts)
+	result.DifficultyOK = len(paper.Questions) > 0 && countsMatch && kl < KLEpsilon
 
 	// 3. Dedup check: intra-paper + vs past-exam + vs generated-pool.
 	dupPairs := v.checkDuplicates(paper)
@@ -369,6 +392,25 @@ func difficultyBandCenter(band models.DifficultyBand) float64 {
 	}
 }
 
+func difficultyCountView(counts map[models.DifficultyBand]int) map[string]int {
+	view := map[string]int{"easy": 0, "medium": 0, "hard": 0}
+	for band, name := range map[models.DifficultyBand]string{
+		models.BandEasy: "easy", models.BandMedium: "medium", models.BandHard: "hard",
+	} {
+		view[name] = counts[band]
+	}
+	return view
+}
+
+func countsEqual(a, b map[models.DifficultyBand]int) bool {
+	for _, band := range []models.DifficultyBand{models.BandEasy, models.BandMedium, models.BandHard} {
+		if a[band] != b[band] {
+			return false
+		}
+	}
+	return true
+}
+
 func hasIncompleteRubric(rubrics []models.Rubric, q models.GeneratedQuestion) bool {
 	for _, rubric := range rubrics {
 		if rubric.QuestionID != q.ID {
@@ -464,14 +506,7 @@ func (v *Validator) checkDuplicates(paper models.ExamPaper) []string {
 // --- Helpers ---
 
 func bandFromDifficulty(d float64) models.DifficultyBand {
-	switch {
-	case d < 0.33:
-		return models.BandEasy
-	case d < 0.67:
-		return models.BandMedium
-	default:
-		return models.BandHard
-	}
+	return models.BandFromDifficulty(d)
 }
 
 func klDivergence(actual, target map[models.DifficultyBand]float64) float64 {

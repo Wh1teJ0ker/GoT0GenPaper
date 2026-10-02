@@ -16,13 +16,15 @@ import (
 	"GoT0GenPaper/internal/models"
 	"GoT0GenPaper/internal/pipeline/grader"
 	"GoT0GenPaper/internal/pipeline/scan"
+	"GoT0GenPaper/internal/pipeline/validator"
 )
 
 const cliUsage = `GoT0GenPaper 命令行工具
 
 用法:
   got0genpaper version
-  got0genpaper generate --subject 408 [--source PATH]
+  got0genpaper generate --subject 408 [--difficulty medium] [--source PATH]
+  got0genpaper repair [--specs spec_001,spec_002] [--compile]
   got0genpaper test-provider [--provider ID] [--base-url URL] [--model MODEL] [--vision]
   got0genpaper test [--network]
   got0genpaper health | artifacts | compile
@@ -68,6 +70,8 @@ func runCLI(args []string) error {
 		return runArtifacts()
 	case "generate":
 		return runGenerate(args[1:])
+	case "repair":
+		return runRepair(args[1:])
 	case "grade":
 		return runGrade(args[1:])
 	case "scan":
@@ -79,6 +83,43 @@ func runCLI(args []string) error {
 	default:
 		return fmt.Errorf("未知命令 %q，运行 got0genpaper help 查看用法", args[0])
 	}
+}
+
+func runRepair(args []string) error {
+	fs := flag.NewFlagSet("repair", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	specs := fs.String("specs", "", "只修复这些 spec 题位，逗号分隔；留空则按校验结果选择")
+	compile := fs.Bool("compile", false, "修复后尝试编译 PDF")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	var ids []string
+	for _, id := range strings.Split(*specs, ",") {
+		if strings.TrimSpace(id) != "" {
+			ids = append(ids, strings.TrimSpace(id))
+		}
+	}
+	a := newCLIAPI()
+	result, err := a.RepairStoredPaper(ids)
+	if err != nil {
+		return err
+	}
+	view := struct {
+		Rounds     int                         `json:"rounds"`
+		Validation *validator.ValidationResult `json:"validation"`
+		OutputDir  string                      `json:"outputDir"`
+	}{result.Rounds, result.Validation, a.store.OutputDir}
+	if err := printJSON(view); err != nil {
+		return err
+	}
+	if *compile {
+		statuses, compileErr := a.CompilePaperPDF()
+		if err := printJSON(statuses); err != nil {
+			return err
+		}
+		return compileErr
+	}
+	return nil
 }
 
 func runScan(args []string, grade bool) error {
@@ -225,6 +266,9 @@ func runGenerate(args []string) error {
 	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	subject := fs.String("subject", "408", "科目：408、数学一、数学二、英语一、英语二、政治")
+	difficulty := fs.String("difficulty", "default", "难度预设：default、easy、medium、hard")
+	difficultyHist := fs.String("difficulty-hist", "", "自定义难度比例：easy,medium,hard，例如 0.2,0.6,0.2")
+	difficultyCounts := fs.String("difficulty-counts", "", "自定义难度题数：easy,medium,hard，例如 2,10,10；总和必须等于该科目题数")
 	source := fs.String("source", "", "真题目录或文件；默认使用 dataDir 下的科目目录")
 	maxRounds := fs.Int("max-repair-rounds", 1, "整卷修复最多轮数；0 表示只生成首轮并校验，不自动修复")
 	compile := fs.Bool("compile", false, "组卷后尝试编译 PDF")
@@ -232,7 +276,7 @@ func runGenerate(args []string) error {
 		return err
 	}
 	a := newCLIAPI()
-	blueprint, err := a.BlueprintForSubject(*subject)
+	blueprint, err := a.BlueprintForSubjectWithDifficultyConfig(*subject, *difficulty, *difficultyHist, *difficultyCounts)
 	if err != nil {
 		return err
 	}
@@ -241,16 +285,19 @@ func runGenerate(args []string) error {
 		return err
 	}
 	result := struct {
-		Subject      string      `json:"subject"`
-		ParseCount   int         `json:"parseCount"`
-		SpecCount    int         `json:"specCount"`
-		Generated    int         `json:"generated"`
-		Answered     int         `json:"answered"`
-		RepairRounds int         `json:"repairRounds"`
-		Validation   interface{} `json:"validation"`
-		OutputDir    string      `json:"outputDir"`
-		Warnings     []string    `json:"warnings"`
-	}{*subject, summary.ParseCount, summary.SpecCount, summary.Generated, summary.Answered, summary.RepairRounds, summary.Validation, a.store.OutputDir, summary.Warnings}
+		Subject          string             `json:"subject"`
+		ParseCount       int                `json:"parseCount"`
+		SpecCount        int                `json:"specCount"`
+		Generated        int                `json:"generated"`
+		Answered         int                `json:"answered"`
+		RepairRounds     int                `json:"repairRounds"`
+		Validation       interface{}        `json:"validation"`
+		OutputDir        string             `json:"outputDir"`
+		Difficulty       string             `json:"difficulty"`
+		DifficultyHist   map[string]float64 `json:"difficultyHist"`
+		DifficultyCounts map[string]int     `json:"difficultyCounts"`
+		Warnings         []string           `json:"warnings"`
+	}{*subject, summary.ParseCount, summary.SpecCount, summary.Generated, summary.Answered, summary.RepairRounds, summary.Validation, a.store.OutputDir, *difficulty, difficultyHistogramView(blueprint.DiffHist), difficultyCountView(blueprint.DiffCountQuota), summary.Warnings}
 	if err := printJSON(result); err != nil {
 		return err
 	}

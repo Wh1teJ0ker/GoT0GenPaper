@@ -33,18 +33,20 @@ import (
 // NOTE: fields intentionally carry no json tags to preserve the existing
 // persisted blueprint format, which uses Go field names (PascalCase).
 type Blueprint struct {
-	Subject              string
-	TotalScore           float64                                    // 目标总分(如150)
-	TypeQuota            map[models.QuestionType]float64            // 题型×分值配额
-	TypeCountQuota       map[models.QuestionType]int                // 题型×题数硬约束
-	DisciplineQuota      map[string]map[models.QuestionType]float64 // 学科×题型分值硬约束
-	DisciplineCountQuota map[string]map[models.QuestionType]int     // 学科×题型题数硬约束
-	DisciplineOrder      []string                                   // 同题型内的学科排序
-	CoverageFloor        map[string]float64                         // 章节/知识点→最低覆盖分(大纲硬约束,A层)
-	BloomQuota           map[models.CognitiveLevel]int              // Bloom认知层→最低题数(A层)
-	DiffHist             map[models.DifficultyBand]float64          // 难度直方图目标比例(B层,带±1 slack)
-	UsageCap             map[string]int                             // 每知识点全卷≤N次(B层软约束)
-	NumQuestions         int                                        // 目标题位数 (0 = 由配额推断；无 TypeCountQuota 时为软目标)
+	Subject               string
+	TotalScore            float64                                    // 目标总分(如150)
+	TypeQuota             map[models.QuestionType]float64            // 题型×分值配额
+	TypeCountQuota        map[models.QuestionType]int                // 题型×题数硬约束
+	DisciplineQuota       map[string]map[models.QuestionType]float64 // 学科×题型分值硬约束
+	DisciplineCountQuota  map[string]map[models.QuestionType]int     // 学科×题型题数硬约束
+	DisciplineOrder       []string                                   // 同题型内的学科排序
+	CoverageFloor         map[string]float64                         // 章节/知识点→最低覆盖分(大纲硬约束,A层)
+	BloomQuota            map[models.CognitiveLevel]int              // Bloom认知层→最低题数(A层)
+	DiffHist              map[models.DifficultyBand]float64          // 难度直方图目标比例(B层)
+	DiffCountQuota        map[models.DifficultyBand]int              // 难度目标题数；非空时优先于比例
+	DifficultyCountStrict bool                                       // 用户显式配置时，题数目标为硬约束
+	UsageCap              map[string]int                             // 每知识点全卷≤N次(B层软约束)
+	NumQuestions          int                                        // 目标题位数 (0 = 由配额推断；无 TypeCountQuota 时为软目标)
 }
 
 // Orchestrator wraps the constraint solver with GNN priors.
@@ -107,10 +109,24 @@ func (o *Orchestrator) Compose(ctx context.Context, bp *Blueprint, candidates []
 	}
 	sort.Slice(types, func(i, j int) bool { return types[i] < types[j] })
 
+	compositionPool := pool
+	if bp.DifficultyCountStrict && len(bp.DiffCountQuota) > 0 {
+		compositionPool = augmentDifficultyPool(pool, bp)
+	}
 	var selection []candidateSpec
 	if len(bp.DisciplineQuota) > 0 {
 		var err error
-		selection, err = selectDisciplineQuotas(pool, bp, types)
+		if bp.DifficultyCountStrict && len(bp.DiffCountQuota) > 0 {
+			selection, err = selectDisciplineQuotasWithDifficulty(compositionPool, bp, types)
+		} else {
+			selection, err = selectDisciplineQuotas(compositionPool, bp, types)
+		}
+		if err != nil {
+			return nil, err
+		}
+	} else if bp.DifficultyCountStrict && len(bp.DiffCountQuota) > 0 {
+		var err error
+		selection, err = selectTypeQuotasWithDifficulty(compositionPool, bp, types)
 		if err != nil {
 			return nil, err
 		}
@@ -155,8 +171,11 @@ func (o *Orchestrator) Compose(ctx context.Context, bp *Blueprint, candidates []
 		}
 	}
 
-	// Local-search improvement (same-type equal-score swaps).
-	selection = o.localSearch(pool, selection, bp)
+	// Local-search improvement (same-type equal-score swaps). When an explicit
+	// difficulty target is active, add low-priority syllabus-backed variants to
+	// the search catalogue so a missing historical band does not make a target
+	// unreachable merely because the corpus lacks that exact annotation.
+	selection = o.localSearch(compositionPool, selection, bp)
 
 	// Deterministic spec-entry order: blueprint type order, then prior.
 	typeIndex := make(map[models.QuestionType]int, len(types))
@@ -196,9 +215,11 @@ func (o *Orchestrator) Compose(ctx context.Context, bp *Blueprint, candidates []
 	}
 
 	return &models.SpecTable{
-		Entries:    entries,
-		TotalScore: sumScores(selection),
-		Subject:    bp.Subject,
+		Entries:                entries,
+		TotalScore:             sumScores(selection),
+		Subject:                bp.Subject,
+		DifficultyTarget:       DifficultyTargetCounts(bp, len(entries)),
+		DifficultyTargetStrict: bp.DifficultyCountStrict,
 	}, nil
 }
 
@@ -281,6 +302,236 @@ func selectDisciplineQuotas(pool []candidateSpec, bp *Blueprint, types []models.
 		}
 	}
 	return selection, nil
+}
+
+// selectDisciplineQuotasWithDifficulty keeps the official type/discipline
+// score and count quotas hard, then solves the remaining difficulty-count
+// allocation across those cells. Each cell contributes exact-fill options
+// annotated with its easy/medium/hard counts; a small DP combines them.
+func selectDisciplineQuotasWithDifficulty(pool []candidateSpec, bp *Blueprint, types []models.QuestionType) ([]candidateSpec, error) {
+	disciplines := make([]string, 0, len(bp.DisciplineQuota))
+	for discipline := range bp.DisciplineQuota {
+		disciplines = append(disciplines, discipline)
+	}
+	sort.Slice(disciplines, func(i, j int) bool {
+		di, dj := disciplineOrderIndex(disciplines[i], bp.DisciplineOrder), disciplineOrderIndex(disciplines[j], bp.DisciplineOrder)
+		if di != dj {
+			return di < dj
+		}
+		return disciplines[i] < disciplines[j]
+	})
+	targets := DifficultyTargetCounts(bp, bp.NumQuestions)
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("difficulty target counts unavailable")
+	}
+	cells := make([]difficultyCell, 0)
+	for _, t := range types {
+		for _, discipline := range disciplines {
+			score := bp.DisciplineQuota[discipline][t]
+			count := bp.DisciplineCountQuota[discipline][t]
+			if count == 0 {
+				continue
+			}
+			cands := candidatesForCell(pool, t, discipline)
+			// Always add a bounded set of low-priority variants. A cell can have
+			// some exact-fill options while still lacking the particular band
+			// vector needed by the whole-paper target.
+			cands = augmentCellCandidates(cands, pool, t, discipline, score, count, bp)
+			options := exactFillDifficultyOptions(cands, score, count)
+			if len(options) == 0 {
+				return nil, fmt.Errorf("cannot satisfy %s/%s quota with requested difficulty bands", discipline, t)
+			}
+			cells = append(cells, difficultyCell{options: options, typeName: t, discipline: discipline})
+		}
+	}
+	selection, ok := combineDifficultyCells(cells, targets)
+	if !ok {
+		return nil, fmt.Errorf("difficulty target counts cannot be satisfied by the available type/discipline candidates")
+	}
+	return selection, nil
+}
+
+func selectTypeQuotasWithDifficulty(pool []candidateSpec, bp *Blueprint, types []models.QuestionType) ([]candidateSpec, error) {
+	targets := DifficultyTargetCounts(bp, bp.NumQuestions)
+	cells := make([]difficultyCell, 0, len(types))
+	for _, t := range types {
+		score, count := bp.TypeQuota[t], bp.TypeCountQuota[t]
+		cands := poolByType(pool, t)
+		cands = augmentCellCandidates(cands, pool, t, "", score, count, bp)
+		options := exactFillDifficultyOptions(cands, score, count)
+		if len(options) == 0 {
+			return nil, fmt.Errorf("cannot satisfy %s quota with requested difficulty bands", t)
+		}
+		cells = append(cells, difficultyCell{options: options, typeName: t})
+	}
+	selection, ok := combineDifficultyCells(cells, targets)
+	if !ok {
+		return nil, fmt.Errorf("difficulty target counts cannot be satisfied by available candidates")
+	}
+	return selection, nil
+}
+
+func augmentCellCandidates(cands, catalogue []candidateSpec, t models.QuestionType, discipline string, score float64, count int, bp *Blueprint) []candidateSpec {
+	out := append([]candidateSpec(nil), cands...)
+	used := make(map[string]bool, len(out))
+	for _, c := range out {
+		used[candidateKey(c)] = true
+	}
+	pointSets := appendUniquePointSets(pointSetCatalogue(catalogue, discipline), fallbackPointSets(discipline))
+	scores := make([]float64, 0)
+	seenScores := make(map[float64]bool)
+	for _, candidate := range cands {
+		if candidate.Score > 0 && !seenScores[candidate.Score] {
+			seenScores[candidate.Score] = true
+			scores = append(scores, candidate.Score)
+		}
+	}
+	average := score / float64(count)
+	for _, q2 := range []int{int(math.Floor(average * 2)), int(math.Ceil(average * 2))} {
+		candidateScore := float64(q2) / 2
+		if q2 > 0 && !seenScores[candidateScore] {
+			seenScores[candidateScore] = true
+			scores = append(scores, candidateScore)
+		}
+	}
+	sort.Float64s(scores)
+	if len(scores) == 0 {
+		scores = []float64{typicalScore(t)}
+	}
+	for _, band := range difficultyBands {
+		for scoreIndex, candidateScore := range scores {
+			// Prefer a real syllabus path. Synthetic paths are only a last
+			// resort after the catalogue is exhausted.
+			points := nextPointSet(pointSets, used, t, len(out)+scoreIndex+int(band))
+			if len(points) == 0 {
+				points = nextSyntheticPointSet(discipline, t, used, len(out)+scoreIndex+int(band))
+			}
+			if len(points) == 0 {
+				continue
+			}
+			out = append(out, candidateSpec{Type: t, Points: points, Cognitive: pickCognitive(bp), DiffBand: band, Score: candidateScore, Template: fmt.Sprintf("%s_%s", t, firstOr(points, discipline)), Prior: 0.005})
+			used[candidateKey(out[len(out)-1])] = true
+		}
+	}
+	return out
+}
+
+type difficultyCell struct {
+	options    []difficultyOption
+	typeName   models.QuestionType
+	discipline string
+}
+
+type difficultyOption struct {
+	selection []candidateSpec
+	counts    map[models.DifficultyBand]int
+	prior     float64
+}
+
+func candidatesForCell(pool []candidateSpec, t models.QuestionType, discipline string) []candidateSpec {
+	out := make([]candidateSpec, 0)
+	for _, candidate := range pool {
+		if candidate.Type == t && disciplineForPoints(candidate.Points) == discipline {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+// exactFillDifficultyOptions enumerates exact score/count selections and
+// retains the highest-prior selection for each band-count vector.
+func exactFillDifficultyOptions(cands []candidateSpec, quota float64, count int) []difficultyOption {
+	if count <= 0 {
+		return nil
+	}
+	items := append([]candidateSpec(nil), cands...)
+	sort.SliceStable(items, func(i, j int) bool { return items[i].Prior > items[j].Prior })
+	if len(items) > 512 {
+		items = items[:512]
+	}
+	Q := int(math.Round(quota * 2))
+	type state struct {
+		score, count       int
+		easy, medium, hard int
+		prior              float64
+		selection          []candidateSpec
+	}
+	states := map[[5]int]state{{0, 0, 0, 0, 0}: {score: 0, count: 0, selection: []candidateSpec{}}}
+	for _, candidate := range items {
+		q2 := int(math.Round(candidate.Score * 2))
+		if q2 <= 0 || q2 > Q {
+			continue
+		}
+		next := make(map[[5]int]state, len(states)*2)
+		put := func(key [5]int, value state) {
+			if previous, exists := next[key]; !exists || betterState(value.prior, value.selection, previous.prior, previous.selection) {
+				next[key] = value
+			}
+		}
+		for key, current := range states {
+			put(key, current)
+			if current.count >= count || current.score+q2 > Q {
+				continue
+			}
+			n := current
+			n.score += q2
+			n.count++
+			n.prior += candidate.Prior
+			switch candidate.DiffBand {
+			case models.BandEasy:
+				n.easy++
+			case models.BandMedium:
+				n.medium++
+			case models.BandHard:
+				n.hard++
+			}
+			n.selection = append(append([]candidateSpec(nil), current.selection...), candidate)
+			put([5]int{n.score, n.count, n.easy, n.medium, n.hard}, n)
+		}
+		states = next
+	}
+	options := make([]difficultyOption, 0)
+	for key, state := range states {
+		if key[0] != Q || key[1] != count {
+			continue
+		}
+		options = append(options, difficultyOption{selection: state.selection, counts: map[models.DifficultyBand]int{models.BandEasy: key[2], models.BandMedium: key[3], models.BandHard: key[4]}, prior: state.prior})
+	}
+	sort.SliceStable(options, func(i, j int) bool {
+		if options[i].prior != options[j].prior {
+			return options[i].prior > options[j].prior
+		}
+		return selectionKey(options[i].selection) < selectionKey(options[j].selection)
+	})
+	return options
+}
+
+func combineDifficultyCells(cells []difficultyCell, targets map[models.DifficultyBand]int) ([]candidateSpec, bool) {
+	type key struct{ easy, medium, hard int }
+	type state struct {
+		prior     float64
+		selection []candidateSpec
+	}
+	states := map[key]state{{}: {}}
+	for _, cell := range cells {
+		next := make(map[key]state)
+		for currentKey, current := range states {
+			for _, option := range cell.options {
+				candidateKey := key{currentKey.easy + option.counts[models.BandEasy], currentKey.medium + option.counts[models.BandMedium], currentKey.hard + option.counts[models.BandHard]}
+				if candidateKey.easy > targets[models.BandEasy] || candidateKey.medium > targets[models.BandMedium] || candidateKey.hard > targets[models.BandHard] {
+					continue
+				}
+				nextState := state{prior: current.prior + option.prior, selection: append(append([]candidateSpec(nil), current.selection...), option.selection...)}
+				if previous, exists := next[candidateKey]; !exists || betterState(nextState.prior, nextState.selection, previous.prior, previous.selection) {
+					next[candidateKey] = nextState
+				}
+			}
+		}
+		states = next
+	}
+	want := key{targets[models.BandEasy], targets[models.BandMedium], targets[models.BandHard]}
+	result, ok := states[want]
+	return result.selection, ok
 }
 
 func disciplineForPoints(points []string) string {
@@ -366,6 +617,131 @@ func ensureFixedCountCandidatesForDiscipline(cands []candidateSpec, t models.Que
 			Prior:     0.01,
 		})
 	}
+	if bp.DifficultyCountStrict && len(bp.DiffCountQuota) > 0 {
+		out = augmentDifficultyCandidates(out, t, scores, bp, discipline, catalogue)
+	}
+	return out
+}
+
+// augmentDifficultyCandidates adds low-priority, syllabus-backed candidates
+// for missing band/score combinations. Historical corpora often contain only
+// medium 5-point choices even though the caller requests hard choices; without
+// these variants, a fixed score quota makes a valid difficulty target
+// impossible for purely arithmetic reasons.
+func augmentDifficultyCandidates(cands []candidateSpec, t models.QuestionType, scores []float64, bp *Blueprint, discipline string, catalogue []candidateSpec) []candidateSpec {
+	pointSets := pointSetCatalogue(catalogue, discipline)
+	pointSets = appendUniquePointSets(pointSets, fallbackPointSets(discipline))
+	usedKeys := make(map[string]bool, len(cands))
+	for _, c := range cands {
+		usedKeys[candidateKey(c)] = true
+	}
+	out := append([]candidateSpec(nil), cands...)
+	for _, score := range scores {
+		for _, band := range difficultyBands {
+			needed := 1
+			if discipline != "" {
+				needed = bp.DisciplineCountQuota[discipline][t]
+			} else if bp.TypeCountQuota[t] > needed {
+				needed = bp.TypeCountQuota[t]
+			}
+			for count := countCandidates(out, t, score, band); count < needed; count++ {
+				points := nextPointSet(pointSets, usedKeys, t, len(out)+int(band)+count)
+				if len(points) == 0 {
+					points = nextSyntheticPointSet(discipline, t, usedKeys, len(out)+int(band)+count)
+				}
+				if len(points) == 0 {
+					break
+				}
+				out = append(out, candidateSpec{
+					Type: t, Points: points, Cognitive: pickCognitive(bp),
+					DiffBand: band, Score: score,
+					Template: fmt.Sprintf("%s_%s", t, firstOr(points, discipline)), Prior: 0.005,
+				})
+			}
+		}
+	}
+	return out
+}
+
+func nextSyntheticPointSet(discipline string, t models.QuestionType, usedKeys map[string]bool, seed int) []string {
+	bases := fallbackPointSets(discipline)
+	for i := 0; i < 100; i++ {
+		var points []string
+		suffix := fmt.Sprintf("难度目标候选_%s_%d", t, seed+i)
+		if len(bases) > 0 {
+			base := bases[(seed+i)%len(bases)]
+			points = append(append([]string(nil), base...), suffix)
+		} else if discipline == "" {
+			points = []string{fmt.Sprintf("%s_auto_%d", t, seed+i)}
+		} else {
+			// Preserve the caller's namespace for non-math2 profiles. Math2
+			// uses the canonical bases above, so this branch is only a generic
+			// fallback for a discipline unknown to the local syllabus table.
+			points = []string{discipline, suffix}
+		}
+		key := candidateKey(candidateSpec{Type: t, Points: points})
+		if !usedKeys[key] {
+			usedKeys[key] = true
+			return points
+		}
+	}
+	return nil
+}
+
+func countCandidates(cands []candidateSpec, t models.QuestionType, score float64, band models.DifficultyBand) int {
+	count := 0
+	for _, candidate := range cands {
+		if candidate.Type == t && math.Abs(candidate.Score-score) <= 0.01 && candidate.DiffBand == band {
+			count++
+		}
+	}
+	return count
+}
+
+func augmentDifficultyPool(pool []candidateSpec, bp *Blueprint) []candidateSpec {
+	out := append([]candidateSpec(nil), pool...)
+	seen := make(map[string]bool, len(out))
+	for _, candidate := range out {
+		seen[candidateKey(candidate)] = true
+	}
+	groups := make(map[string][]candidateSpec)
+	groupTypes := make(map[string]models.QuestionType)
+	groupDisciplines := make(map[string]string)
+	for _, candidate := range pool {
+		discipline := ""
+		if len(bp.DisciplineQuota) > 0 {
+			discipline = disciplineForPoints(candidate.Points)
+		}
+		key := string(candidate.Type) + "\x00" + discipline
+		groups[key] = append(groups[key], candidate)
+		groupTypes[key] = candidate.Type
+		groupDisciplines[key] = discipline
+	}
+	groupKeys := make([]string, 0, len(groups))
+	for key := range groups {
+		groupKeys = append(groupKeys, key)
+	}
+	sort.Strings(groupKeys)
+	for _, key := range groupKeys {
+		candidates := groups[key]
+		scoreSet := make(map[float64]bool)
+		scores := make([]float64, 0)
+		for _, candidate := range candidates {
+			if candidate.Score > 0 && !scoreSet[candidate.Score] {
+				scoreSet[candidate.Score] = true
+				scores = append(scores, candidate.Score)
+			}
+		}
+		sort.Float64s(scores)
+		augmented := augmentDifficultyCandidates(candidates, groupTypes[key], scores, bp, groupDisciplines[key], pool)
+		for _, candidate := range augmented {
+			candidateKeyValue := candidateKey(candidate)
+			if !seen[candidateKeyValue] {
+				seen[candidateKeyValue] = true
+				out = append(out, candidate)
+			}
+		}
+	}
 	return out
 }
 
@@ -412,6 +788,9 @@ func appendUniquePointSets(base, extra [][]string) [][]string {
 }
 
 func nextPointSet(catalogue [][]string, usedKeys map[string]bool, t models.QuestionType, seed int) []string {
+	if len(catalogue) == 0 {
+		return nil
+	}
 	for offset := 0; offset < len(catalogue); offset++ {
 		points := catalogue[(seed+offset)%len(catalogue)]
 		candidate := candidateSpec{Type: t, Points: points}
@@ -422,6 +801,22 @@ func nextPointSet(catalogue [][]string, usedKeys map[string]bool, t models.Quest
 		return append([]string(nil), points...)
 	}
 	return nil
+}
+
+func betterState(prior float64, selection []candidateSpec, otherPrior float64, otherSelection []candidateSpec) bool {
+	if math.Abs(prior-otherPrior) > 1e-12 {
+		return prior > otherPrior
+	}
+	return selectionKey(selection) < selectionKey(otherSelection)
+}
+
+func selectionKey(selection []candidateSpec) string {
+	keys := make([]string, 0, len(selection))
+	for _, candidate := range selection {
+		keys = append(keys, candidateKey(candidate))
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "\x00")
 }
 
 // These are only a last resort for an empty historical catalogue. They are
@@ -827,10 +1222,11 @@ func candidateKey(c candidateSpec) string {
 }
 
 // localSearch improves the selection by swapping candidates to reduce the
-// B-layer penalty. Swaps preserve score and type (quota sums stay intact)
-// and never introduce a candidate key already present in the selection
-// (the DP selections are distinct; without usage tracking the swap pass
-// could stamp the same high-prior candidate into several slots).
+// B-layer penalty. Single swaps preserve score and type; pair swaps preserve
+// the combined score, type, and discipline. Pair swaps are important when a
+// fixed-count cell has mixed historical scores (for example 10+12-point
+// major questions): a one-for-one same-score swap cannot reach another valid
+// score composition even when the requested difficulty mix is feasible.
 func (o *Orchestrator) localSearch(pool []candidateSpec, selection []candidateSpec, bp *Blueprint) []candidateSpec {
 	const maxIter = 50
 	currentPenalty := o.totalPenalty(selection, bp)
@@ -872,10 +1268,67 @@ func (o *Orchestrator) localSearch(pool []candidateSpec, selection []candidateSp
 			}
 		}
 		if !improved {
-			break
+			for i := 0; i < len(selection) && !improved; i++ {
+				for j := i + 1; j < len(selection) && !improved; j++ {
+					oldI, oldJ := selection[i], selection[j]
+					if oldI.Type != oldJ.Type {
+						continue
+					}
+					disciplineI := disciplineForPoints(oldI.Points)
+					disciplineJ := disciplineForPoints(oldJ.Points)
+					sameGroup := len(bp.DisciplineQuota) == 0 || disciplineI == disciplineJ
+					oldSum := oldI.Score + oldJ.Score
+					oldKeyI, oldKeyJ := candidateKey(oldI), candidateKey(oldJ)
+					allowed := map[string]int{oldKeyI: 1, oldKeyJ: 1}
+					for _, candI := range pool {
+						if candI.Type != oldI.Type || !sameDiscipline(candI, oldI, bp) {
+							continue
+						}
+						keyI := candidateKey(candI)
+						if usage[keyI]-allowed[keyI] > 0 {
+							continue
+						}
+						for _, candJ := range pool {
+							if candJ.Type != oldJ.Type || !sameDiscipline(candJ, oldJ, bp) {
+								continue
+							}
+							if sameGroup {
+								if math.Abs(candI.Score+candJ.Score-oldSum) > 0.01 {
+									continue
+								}
+							} else if math.Abs(candI.Score-oldI.Score) > 0.01 || math.Abs(candJ.Score-oldJ.Score) > 0.01 {
+								continue
+							}
+							keyJ := candidateKey(candJ)
+							if keyJ == keyI || usage[keyJ]-allowed[keyJ] > 0 {
+								continue
+							}
+							selection[i], selection[j] = candI, candJ
+							newPenalty := o.totalPenalty(selection, bp)
+							if newPenalty < currentPenalty {
+								currentPenalty = newPenalty
+								usage[oldKeyI]--
+								usage[oldKeyJ]--
+								usage[keyI]++
+								usage[keyJ]++
+								improved = true
+								break
+							}
+							selection[i], selection[j] = oldI, oldJ
+						}
+					}
+				}
+			}
+			if !improved {
+				break
+			}
 		}
 	}
 	return selection
+}
+
+func sameDiscipline(candidate, reference candidateSpec, bp *Blueprint) bool {
+	return len(bp.DisciplineQuota) == 0 || disciplineForPoints(candidate.Points) == disciplineForPoints(reference.Points)
 }
 
 // totalPenalty computes the B-layer soft-target violation penalty.
@@ -884,7 +1337,10 @@ func (o *Orchestrator) localSearch(pool []candidateSpec, selection []candidateSp
 //   - Usage cap excess (sum of max(0, count - cap) per point)
 //   - Prior bonus (negative penalty: higher prior = lower penalty)
 func (o *Orchestrator) totalPenalty(selection []candidateSpec, bp *Blueprint) float64 {
-	// Difficulty histogram deviation.
+	// Difficulty histogram deviation. The integer target is the primary signal:
+	// a ratio such as 10/45/45 cannot be represented exactly by every paper
+	// length, so comparing only fractions can leave the nearest valid slot
+	// assignment under-specified.
 	bandCounts := make(map[models.DifficultyBand]int)
 	for _, c := range selection {
 		bandCounts[c.DiffBand]++
@@ -897,6 +1353,12 @@ func (o *Orchestrator) totalPenalty(selection []candidateSpec, bp *Blueprint) fl
 	for band, targetFrac := range bp.DiffHist {
 		actualFrac := float64(bandCounts[band]) / float64(total)
 		histPenalty += math.Abs(actualFrac - targetFrac)
+	}
+	difficultyCountPenalty := 0.0
+	if targets := DifficultyTargetCounts(bp, total); bp.DifficultyCountStrict && len(targets) > 0 {
+		for _, band := range difficultyBands {
+			difficultyCountPenalty += math.Abs(float64(bandCounts[band] - targets[band]))
+		}
 	}
 
 	// Usage cap excess.
@@ -921,7 +1383,9 @@ func (o *Orchestrator) totalPenalty(selection []candidateSpec, bp *Blueprint) fl
 		priorBonus += c.Prior
 	}
 
-	return histPenalty + capPenalty - priorBonus*0.5
+	// Count targets are deliberately dominant, while the fractional histogram
+	// and GNN prior still break ties among equally accurate compositions.
+	return difficultyCountPenalty*10 + histPenalty + capPenalty - priorBonus*0.5
 }
 
 // lookupPrior looks up the GNN weight for a candidate's (point, type, cognitive).
@@ -969,15 +1433,94 @@ func pickCognitive(bp *Blueprint) models.CognitiveLevel {
 
 // --- Helpers ---
 
-func bandFromDifficulty(d float64) models.DifficultyBand {
-	switch {
-	case d < 0.33:
-		return models.BandEasy
-	case d < 0.67:
-		return models.BandMedium
-	default:
-		return models.BandHard
+var difficultyBands = []models.DifficultyBand{
+	models.BandEasy,
+	models.BandMedium,
+	models.BandHard,
+}
+
+// AllocateDifficultyCounts converts a normalized difficulty histogram into
+// integer question counts. Largest-remainder allocation keeps the total exact
+// and makes ties deterministic in easy -> medium -> hard order.
+func AllocateDifficultyCounts(hist map[models.DifficultyBand]float64, total int) (map[models.DifficultyBand]int, error) {
+	if total < 0 {
+		return nil, fmt.Errorf("difficulty total cannot be negative")
 	}
+	if len(hist) == 0 {
+		return nil, nil
+	}
+	totalFraction := 0.0
+	for _, band := range difficultyBands {
+		value := hist[band]
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return nil, fmt.Errorf("difficulty ratio must be a finite non-negative number")
+		}
+		totalFraction += value
+	}
+	if math.Abs(totalFraction-1) > 1e-6 {
+		return nil, fmt.Errorf("difficulty ratios must sum to 1, got %.6f", totalFraction)
+	}
+
+	counts := make(map[models.DifficultyBand]int, len(difficultyBands))
+	type remainder struct {
+		band      models.DifficultyBand
+		remainder float64
+	}
+	remainders := make([]remainder, 0, len(difficultyBands))
+	allocated := 0
+	for _, band := range difficultyBands {
+		exact := hist[band] * float64(total)
+		whole := int(math.Floor(exact + 1e-12))
+		counts[band] = whole
+		allocated += whole
+		remainders = append(remainders, remainder{band: band, remainder: exact - float64(whole)})
+	}
+	sort.SliceStable(remainders, func(i, j int) bool {
+		if math.Abs(remainders[i].remainder-remainders[j].remainder) > 1e-12 {
+			return remainders[i].remainder > remainders[j].remainder
+		}
+		return remainders[i].band < remainders[j].band
+	})
+	for i := 0; allocated < total; i++ {
+		counts[remainders[i%len(remainders)].band]++
+		allocated++
+	}
+	return counts, nil
+}
+
+// DifficultyTargetCounts returns the integer target used by composition and
+// validation. Explicit counts are authoritative when they match total;
+// otherwise the histogram is converted with largest-remainder allocation.
+func DifficultyTargetCounts(bp *Blueprint, total int) map[models.DifficultyBand]int {
+	if bp == nil || total < 0 {
+		return nil
+	}
+	if len(bp.DiffCountQuota) > 0 {
+		sum := 0
+		counts := make(map[models.DifficultyBand]int, len(difficultyBands))
+		valid := true
+		for _, band := range difficultyBands {
+			value := bp.DiffCountQuota[band]
+			if value < 0 {
+				valid = false
+				break
+			}
+			counts[band] = value
+			sum += value
+		}
+		if valid && sum == total {
+			return counts
+		}
+	}
+	counts, err := AllocateDifficultyCounts(bp.DiffHist, total)
+	if err != nil {
+		return nil
+	}
+	return counts
+}
+
+func bandFromDifficulty(d float64) models.DifficultyBand {
+	return models.BandFromDifficulty(d)
 }
 
 func typicalScore(t models.QuestionType) float64 {

@@ -63,6 +63,103 @@ func TestMissingCoverageMapsBackToSpecSlot(t *testing.T) {
 	}
 }
 
+func TestValidateReportsAndEnforcesDifficultyCounts(t *testing.T) {
+	makePaper := func(difficulties ...float64) models.ExamPaper {
+		paper := models.ExamPaper{
+			Subject: "数学二",
+			SpecTable: models.SpecTable{
+				DifficultyTarget: map[models.DifficultyBand]int{
+					models.BandEasy: 1, models.BandMedium: 1, models.BandHard: 1,
+				},
+			},
+			TotalScore: 3,
+		}
+		for i, difficulty := range difficulties {
+			paper.Questions = append(paper.Questions, models.GeneratedQuestion{
+				ID: fmt.Sprintf("q%d", i), SpecID: fmt.Sprintf("spec_%d", i),
+				Type: models.TypeMajor, Score: 1, Difficulty: difficulty,
+				Stem: "题面", Answer: "答案", Status: "ready",
+			})
+		}
+		return paper
+	}
+
+	matched, err := New(nil).Validate(context.Background(), makePaper(0.25, 0.5, 0.75), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched.DifficultyOK || matched.DifficultyCountsActual["easy"] != 1 || matched.DifficultyCountsTarget["hard"] != 1 {
+		t.Fatalf("matched difficulty result = %+v", matched)
+	}
+
+	mismatched, err := New(nil).Validate(context.Background(), makePaper(0.25, 0.25, 0.75), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mismatched.DifficultyOK || mismatched.DifficultyCountsActual["medium"] != 0 {
+		t.Fatalf("mismatched difficulty result = %+v", mismatched)
+	}
+}
+
+func TestValidateKeepsDefaultDifficultyAsSoftTarget(t *testing.T) {
+	makePaper := func(strict bool) models.ExamPaper {
+		paper := models.ExamPaper{
+			Subject: "数学二",
+			SpecTable: models.SpecTable{
+				DifficultyTarget:       map[models.DifficultyBand]int{models.BandEasy: 2, models.BandMedium: 10, models.BandHard: 10},
+				DifficultyTargetStrict: strict,
+			},
+			TotalScore: 22,
+		}
+		// 3/9/10 is close to 2/10/10 in ratio and is deliberately not an
+		// exact integer match. It must pass only for the soft default mode.
+		for i := 0; i < 22; i++ {
+			difficulty := 0.5
+			if i < 3 {
+				difficulty = 0.25
+				paper.Questions = append(paper.Questions, models.GeneratedQuestion{ID: fmt.Sprintf("q%d", i), Type: models.TypeMajor, Score: 1, Difficulty: difficulty, Stem: "题面", Answer: "答案", Status: "ready"})
+				continue
+			}
+			band := models.BandMedium
+			if i >= 12 {
+				band = models.BandHard
+			}
+			value := 0.5
+			if band == models.BandHard {
+				value = 0.75
+			}
+			paper.Questions = append(paper.Questions, models.GeneratedQuestion{ID: fmt.Sprintf("q%d", i), Type: models.TypeMajor, Score: 1, Difficulty: value, Stem: "题面", Answer: "答案", Status: "ready"})
+		}
+		return paper
+	}
+
+	blueprint := &orchestrator.Blueprint{
+		DiffHist: map[models.DifficultyBand]float64{
+			models.BandEasy: 0.1, models.BandMedium: 0.45, models.BandHard: 0.45,
+		},
+		DiffCountQuota: map[models.DifficultyBand]int{
+			models.BandEasy: 2, models.BandMedium: 10, models.BandHard: 10,
+		},
+		NumQuestions: 22,
+	}
+	soft, err := New(nil).Validate(context.Background(), makePaper(false), blueprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !soft.DifficultyOK {
+		t.Fatalf("soft default target should use the ratio check: %+v", soft)
+	}
+	strictBlueprint := *blueprint
+	strictBlueprint.DifficultyCountStrict = true
+	strict, err := New(nil).Validate(context.Background(), makePaper(true), &strictBlueprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strict.DifficultyOK {
+		t.Fatalf("strict target accepted a mismatched integer distribution: %+v", strict)
+	}
+}
+
 func TestValidateRequiresCompleteRubrics(t *testing.T) {
 	paper := models.ExamPaper{
 		Questions:  []models.GeneratedQuestion{{ID: "q1", Type: models.TypeMajor, Score: 10, Stem: "题面", Answer: "答案", Status: "ready"}},
