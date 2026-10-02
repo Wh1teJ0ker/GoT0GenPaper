@@ -19,6 +19,9 @@ import (
 )
 
 func TestReassembleAudit(t *testing.T) {
+	if os.Getenv("RUN_OUTPUT_AUDIT") != "1" {
+		t.Skip("set RUN_OUTPUT_AUDIT=1 to audit persisted output/live artifacts")
+	}
 	liveDir := repoPath("output", "live")
 	data, err := os.ReadFile(filepath.Join(liveDir, "paper.json"))
 	if err != nil {

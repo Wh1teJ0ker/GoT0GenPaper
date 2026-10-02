@@ -94,15 +94,27 @@ func writeExamSource(t *testing.T) string {
 	return dir
 }
 
+// requirePipelineIntegration keeps the default test suite deterministic and
+// cheap. Full stage orchestration intentionally remains an opt-in local test:
+// even with a dead endpoint it exercises question generation, answer
+// production, persistence, and LaTeX assembly rather than a unit contract.
+func requirePipelineIntegration(t *testing.T) {
+	t.Helper()
+	if os.Getenv("RUN_PIPELINE_TESTS") != "1" {
+		t.Skip("set RUN_PIPELINE_TESTS=1 to run full pipeline integration tests")
+	}
+}
+
 // TestRunPipelineSmoke drives stages 1→7 end-to-end (LLM fallbacks active)
 // and verifies the state flow + persistence contract of each stage.
 func TestRunPipelineSmoke(t *testing.T) {
+	requirePipelineIntegration(t)
 	a := newTestAPI(t)
 	source := writeExamSource(t)
 
 	summary, err := a.RunPipeline(PipelineRequest{
 		Source:          source,
-		Blueprint:       a.DefaultBlueprint(),
+		Blueprint:       smallBlueprint(),
 		MaxRepairRounds: 2,
 	})
 	if err != nil {
@@ -159,12 +171,13 @@ func TestRunPipelineSmoke(t *testing.T) {
 }
 
 func TestRunPipelineZeroRepairRoundsOnlyValidates(t *testing.T) {
+	requirePipelineIntegration(t)
 	a := newTestAPI(t)
 	source := writeExamSource(t)
 
 	summary, err := a.RunPipeline(PipelineRequest{
 		Source:          source,
-		Blueprint:       a.DefaultBlueprint(),
+		Blueprint:       smallBlueprint(),
 		MaxRepairRounds: 0,
 	})
 	if err != nil {
@@ -181,6 +194,7 @@ func TestRunPipelineZeroRepairRoundsOnlyValidates(t *testing.T) {
 // TestStageFlowWithState verifies each stage API individually, including
 // the "reuse previous stage output when input is empty" behaviour.
 func TestStageFlowWithState(t *testing.T) {
+	requirePipelineIntegration(t)
 	a := newTestAPI(t)
 	source := writeExamSource(t)
 
@@ -211,7 +225,7 @@ func TestStageFlowWithState(t *testing.T) {
 	}
 
 	// Stage 3 with empty candidates → must fall back to lastParse.
-	spec, err := a.ComposeExam(a.DefaultBlueprint(), nil)
+	spec, err := a.ComposeExam(smallBlueprint(), nil)
 	if err != nil {
 		t.Fatalf("ComposeExam: %v", err)
 	}

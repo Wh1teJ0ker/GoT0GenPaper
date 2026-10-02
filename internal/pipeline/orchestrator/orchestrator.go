@@ -1229,7 +1229,13 @@ func candidateKey(c candidateSpec) string {
 // score composition even when the requested difficulty mix is feasible.
 func (o *Orchestrator) localSearch(pool []candidateSpec, selection []candidateSpec, bp *Blueprint) []candidateSpec {
 	const maxIter = 50
+	// Local search is a tie-breaker after the hard quota solver. Keep its
+	// evaluation budget bounded because pair swaps are quadratic in both the
+	// selected paper and the candidate catalogue. This makes composition
+	// predictable for large historical corpora while retaining useful tuning.
+	const maxEvaluations = 100000
 	currentPenalty := o.totalPenalty(selection, bp)
+	evaluations := 0
 
 	usage := make(map[string]int, len(selection))
 	for _, c := range selection {
@@ -1242,6 +1248,10 @@ func (o *Orchestrator) localSearch(pool []candidateSpec, selection []candidateSp
 			old := selection[i]
 			oldKey := candidateKey(old)
 			for _, cand := range pool {
+				if evaluations >= maxEvaluations {
+					return selection
+				}
+				evaluations++
 				if cand.Score != old.Score || cand.Type != old.Type {
 					continue // swap must preserve score and type to keep quota sums
 				}
@@ -1268,6 +1278,12 @@ func (o *Orchestrator) localSearch(pool []candidateSpec, selection []candidateSp
 			}
 		}
 		if !improved {
+			// Pair swaps are only needed to escape mixed-score local minima.
+			// For the default soft histogram target, the bounded single-swap
+			// pass is sufficient and avoids an unnecessary catalogue square.
+			if !bp.DifficultyCountStrict {
+				break
+			}
 			for i := 0; i < len(selection) && !improved; i++ {
 				for j := i + 1; j < len(selection) && !improved; j++ {
 					oldI, oldJ := selection[i], selection[j]
@@ -1281,6 +1297,10 @@ func (o *Orchestrator) localSearch(pool []candidateSpec, selection []candidateSp
 					oldKeyI, oldKeyJ := candidateKey(oldI), candidateKey(oldJ)
 					allowed := map[string]int{oldKeyI: 1, oldKeyJ: 1}
 					for _, candI := range pool {
+						if evaluations >= maxEvaluations {
+							return selection
+						}
+						evaluations++
 						if candI.Type != oldI.Type || !sameDiscipline(candI, oldI, bp) {
 							continue
 						}
@@ -1289,6 +1309,10 @@ func (o *Orchestrator) localSearch(pool []candidateSpec, selection []candidateSp
 							continue
 						}
 						for _, candJ := range pool {
+							if evaluations >= maxEvaluations {
+								return selection
+							}
+							evaluations++
 							if candJ.Type != oldJ.Type || !sameDiscipline(candJ, oldJ, bp) {
 								continue
 							}

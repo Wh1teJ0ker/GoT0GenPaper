@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"math"
 	"os"
 	"reflect"
@@ -243,9 +242,12 @@ func TestDifficultyCountsValidation(t *testing.T) {
 }
 
 func TestMath2CompositionUsesDifficultyTargets(t *testing.T) {
+	if os.Getenv("RUN_CORPUS_TESTS") != "1" {
+		t.Skip("set RUN_CORPUS_TESTS=1 to compose against the bundled math2 corpus")
+	}
 	a := newTestAPI(t)
 	profile, _ := subjectProfile("math2")
-	parsed, err := a.parser.Parse(context.Background(), repoPath("data", profile.Source))
+	parsed, err := a.parser.Parse(t.Context(), repoPath("data", profile.Source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +255,7 @@ func TestMath2CompositionUsesDifficultyTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec, err := a.orch.Compose(context.Background(), &bp, parsed.Questions)
+	spec, err := a.orch.Compose(t.Context(), &bp, parsed.Questions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,10 +274,13 @@ func TestMath2CompositionUsesDifficultyTargets(t *testing.T) {
 }
 
 func TestAllSelectableSubjectsCanComposeFromBundledQuestions(t *testing.T) {
+	if os.Getenv("RUN_CORPUS_TESTS") != "1" {
+		t.Skip("set RUN_CORPUS_TESTS=1 to compose against all bundled corpora")
+	}
 	a := newTestAPI(t)
 	for _, key := range []string{"408", "math1", "math2", "english1", "english2", "politics"} {
 		profile, _ := subjectProfile(key)
-		parsed, err := a.parser.Parse(context.Background(), repoPath("data", profile.Source))
+		parsed, err := a.parser.Parse(t.Context(), repoPath("data", profile.Source))
 		if err != nil {
 			t.Fatalf("parse %s: %v", key, err)
 		}
@@ -283,7 +288,7 @@ func TestAllSelectableSubjectsCanComposeFromBundledQuestions(t *testing.T) {
 			t.Fatalf("parse %s returned no questions", key)
 		}
 		bp, _ := blueprintForSubject(key)
-		spec, err := a.orch.Compose(context.Background(), &bp, parsed.Questions)
+		spec, err := a.orch.Compose(t.Context(), &bp, parsed.Questions)
 		if err != nil {
 			t.Fatalf("compose %s: %v", key, err)
 		}

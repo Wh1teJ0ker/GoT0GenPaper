@@ -8,7 +8,7 @@ VERSION_FILE ?= VERSION
 VERSION ?= $(shell if test -f "$(VERSION_FILE)"; then tr -d '[:space:]' < "$(VERSION_FILE)"; else echo dev; fi)
 LDFLAGS ?= -s -w -X main.version=$(VERSION)
 
-.PHONY: help fmt fmt-check mod-verify test test-race vet build check selftest generate pdf version
+.PHONY: help fmt fmt-check mod-verify test test-race test-integration test-corpus test-output-audit vet build check selftest generate pdf version
 
 help:
 	@echo 'make fmt        Format Go source files'
@@ -16,6 +16,9 @@ help:
 	@echo 'make mod-verify  Verify downloaded Go modules'
 	@echo 'make test       Run all Go tests'
 	@echo 'make test-race  Run tests with the race detector'
+	@echo 'make test-integration  Run local full-pipeline tests (explicit, no CI)'
+	@echo 'make test-corpus  Parse and compose bundled historical corpora (explicit)'
+	@echo 'make test-output-audit  Reassemble and compile persisted output/live artifacts (explicit)'
 	@echo 'make vet        Run go vet'
 	@echo 'make build      Build bin/got0genpaper'
 	@echo 'make check      Run format, module, test, vet, and build checks'
@@ -30,6 +33,15 @@ test:
 
 test-race:
 	$(GO) test -race ./...
+
+test-integration:
+	RUN_PIPELINE_TESTS=1 $(GO) test ./cmd/got0genpaper -run 'TestRunPipelineSmoke|TestRunPipelineZeroRepairRoundsOnlyValidates|TestStageFlowWithState' -v
+
+test-corpus:
+	RUN_CORPUS_TESTS=1 $(GO) test ./cmd/got0genpaper -run 'TestMath2CompositionUsesDifficultyTargets|TestAllSelectableSubjectsCanComposeFromBundledQuestions' -v
+
+test-output-audit:
+	RUN_OUTPUT_AUDIT=1 $(GO) test ./cmd/got0genpaper -run TestReassembleAudit -v
 
 vet:
 	$(GO) vet ./...

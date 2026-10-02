@@ -6,6 +6,20 @@
 - PDF 相关测试在发现 `xelatex`/`tectonic` 时会额外编译临时文档；CI 不需要配置 LLM 密钥。
 - 实时 LLM 测试默认跳过，只有显式设置对应环境变量才会联网并产生费用。
 
+## 测试分层
+
+默认测试是无网络、无 API Key、无整卷生成的快速契约测试。它使用小型内存题目夹具验证编排、配额、校验、修复、配置和存储等边界；不会解析 `data/exams/`，也不会调用完整的生成/答案流水线。
+
+需要真实题库或完整流水线时，必须显式开启对应测试：
+
+```bash
+make test-integration  # 小型样例跑完整阶段，LLM 不可用时走确定性降级
+make test-corpus       # 解析并编排仓库内历年题库，可能较慢
+make test-output-audit # 审计 output/live 中已持久化的试卷并尝试编译
+```
+
+实时 LLM 测试仍需另外设置 `LIVE_GENERATION_PROBE=1` 或 `LIVE_LLM=1`，默认永远跳过。
+
 ## 日常验证
 
 ```bash
@@ -19,7 +33,7 @@ make check         # fmt-check + mod-verify + test + vet + build
 make selftest      # 本机运行时、配置、模板、真题目录和写权限检查
 ```
 
-CI 执行 race tests、`go vet` 和 CLI 构建。可选实时测试：
+CI 执行默认 race tests、`go vet` 和 CLI 构建；不会执行 `make test-integration`、`make test-corpus` 或实时 LLM 测试。可选实时测试：
 
 ```bash
 LIVE_GENERATION_PROBE=1 go test ./cmd/got0genpaper -run TestLiveGenerationProbe -v

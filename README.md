@@ -290,6 +290,9 @@ make build                              # 编译 CLI
 make version                            # 查看版本
 make test                               # 运行测试
 make test-race                          # 运行竞态检测
+make test-integration                   # 显式运行 3 道题的离线完整流水线
+make test-corpus                        # 显式解析并编排 bundled 历年题库
+make test-output-audit                  # 显式审计 output/live 中的持久化产物
 make vet                                # 静态检查
 make check                              # 格式、依赖、测试、vet、构建
 make selftest                           # 检查本地运行环境
@@ -300,6 +303,8 @@ make pdf                                # 编译 output/*.tex
 ./bin/got0genpaper health                # 查看当前运行状态
 ./bin/got0genpaper artifacts             # 查看生成产物
 ```
+
+默认 `make test` / CI 测试只使用内存夹具，验证配额、编排、校验、修复、配置和存储契约；不会调用 LLM、解析完整历年题库或生成整套试卷。需要验证完整阶段时使用 `make test-integration`，需要检查真实题库时使用 `make test-corpus`，两者都不会访问真实 LLM。
 
 ## 出问题时先看哪里
 

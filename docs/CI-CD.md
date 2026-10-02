@@ -24,11 +24,19 @@ git push origin vX.Y.Z
 1. 从 `go.mod` 读取 Go 版本并下载依赖。
 2. 检查所有 Go 源文件已通过 `gofmt`。
 3. 执行 `go mod verify` 验证依赖完整性。
-4. 执行 `go test -race ./...`。
+4. 执行 `go test -race ./...`。默认测试使用内存夹具，不解析完整历年题库，也不生成整套试卷。
 5. 执行 `go vet ./...`。
 6. 构建 CLI。
 
 CI 不访问 LLM，不需要 `config.toml`、API Key、TeX 或 OCR。实时文本/多模态测试必须由开发者在本机手动开启，不能把真实密钥放进普通 PR 工作流。
+
+需要在本机验证完整阶段或真实题库时，显式执行：
+
+```bash
+make test-integration  # 完整阶段，但使用小型样例和离线降级
+make test-corpus       # 真实 bundled corpus，可能较慢
+make test-output-audit # 仅在存在 output/live/paper.json 时运行
+```
 
 ## 发布工作流
 
