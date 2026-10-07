@@ -4,9 +4,9 @@
 
 ## 版本来源
 
-- `VERSION`：本地构建版本的单一来源，当前为 `0.1.1`。
+- `VERSION`：本地构建版本的单一来源，当前为 `0.1.2`。
 - `make build`：读取 `VERSION` 并通过 Go linker flag 注入 `main.version`。
-- Git 标签：正式发布版本，例如 `v0.1.1`；发布工作流会使用 `GITHUB_REF_NAME` 覆盖本地版本。
+- Git 标签：正式发布版本，例如 `v0.1.2`；发布工作流会使用 `GITHUB_REF_NAME` 覆盖本地版本。
 - `got0genpaper version`：查看最终编译进二进制的版本。
 
 发布前确认目标提交已包含源码、测试和文档，并通过 CI；然后创建标签并推送：
@@ -28,7 +28,7 @@ git push origin vX.Y.Z
 5. 执行 `go vet ./...`。
 6. 构建 CLI。
 
-CI 不访问 LLM，不需要 `config.toml`、API Key、TeX 或 OCR。实时文本/多模态测试必须由开发者在本机手动开启，不能把真实密钥放进普通 PR 工作流。
+CI 不访问 LLM，不需要 `config.toml`、API Key 或 TeX。真实供应商连接测试必须由开发者在本机手动开启，不能把真实密钥放进普通 PR 工作流。
 
 需要在本机验证完整阶段或真实题库时，显式执行：
 
@@ -78,4 +78,4 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o /tmp/got0genpaper-li
 GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o /tmp/got0genpaper-darwin-arm64 ./cmd/got0genpaper
 ```
 
-发布包只包含 CLI、README、许可证、配置模板和文档，不捆绑真题、密钥或 TeX 引擎。使用者需单独准备题库、配置和 PDF 编译引擎；扫描批改直接使用供应商的多模态模型，不需要本地 OCR。
+发布包只包含 CLI、README、许可证、配置模板和文档，不捆绑真题、密钥或 TeX 引擎。使用者需单独准备题库、配置和 PDF 编译引擎。

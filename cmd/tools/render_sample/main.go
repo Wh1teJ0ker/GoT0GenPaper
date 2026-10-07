@@ -1,5 +1,5 @@
-// Command render_sample builds a full 408 deliverable set (试卷/答案/答题卡)
-// from real past-exam content and compiles it to PDF when a TeX engine is
+// Command render_sample builds a printable 408 exam from real past-exam content
+// and compiles it to PDF when a TeX engine is
 // available. It exercises the format pipeline end-to-end:
 //
 //	go run ./cmd/tools/render_sample [exam.md]   (default: 2024 408 paper)
@@ -64,14 +64,6 @@ func main() {
 			Score:      pq.Score,
 			Difficulty: 0.5,
 		})
-		// A minimal rubric so the answer key shows 评分标准 structure.
-		paper.Rubrics = append(paper.Rubrics, models.Rubric{
-			ID:                "rubric_q_" + pq.ID,
-			QuestionID:        "q_" + pq.ID,
-			Items:             []models.RubricItem{{ID: "chk_1", Description: "答案正确且完整", MaxScore: pq.Score}},
-			AcceptableMethods: []string{"标准解法"},
-			Version:           1,
-		})
 	}
 	paper.TotalScore = total
 	// Double-check the choice section intro assumption: uniform per-question
@@ -83,10 +75,7 @@ func main() {
 		log.Fatalf("assemble: %v", err)
 	}
 	for name, content := range map[string]string{
-		"exam.tex":         out.ExamLaTeX,
-		"answers.tex":      out.AnswerLaTeX,
-		"answer_sheet.tex": out.AnswerSheetTeX,
-		"spec_table.md":    out.SpecTable,
+		"exam.tex": out.ExamLaTeX,
 	} {
 		path := filepath.Join(outDir, name)
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -101,16 +90,14 @@ func main() {
 		return
 	}
 	fmt.Println("engine:", engine)
-	for _, name := range []string{"exam.tex", "answers.tex", "answer_sheet.tex"} {
-		res, err := latex.CompileTex(context.Background(), engine, filepath.Join(outDir, name))
-		if err != nil {
-			fmt.Printf("✗ %s: %v\n", name, err)
-			if res != nil {
-				fmt.Println(res.Log)
-			}
-			continue
+	compiled, err := latex.CompileTex(context.Background(), engine, filepath.Join(outDir, "exam.tex"))
+	if err != nil {
+		fmt.Printf("✗ exam.tex: %v\n", err)
+		if compiled != nil {
+			fmt.Println(compiled.Log)
 		}
-		fmt.Printf("✓ %s → %s (%s)\n", name, res.PDF, res.Duration)
+		return
 	}
+	fmt.Printf("✓ exam.tex → %s (%s)\n", compiled.PDF, compiled.Duration)
 	_ = store
 }

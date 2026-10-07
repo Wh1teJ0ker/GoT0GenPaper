@@ -35,9 +35,9 @@ func TestSelectableSubjectProfiles(t *testing.T) {
 				"高等数学": {models.TypeChoice: 7, models.TypeFillBlank: 5, models.TypeMajor: 5},
 				"线性代数": {models.TypeChoice: 3, models.TypeFillBlank: 1, models.TypeMajor: 1},
 			}},
-		"english1": {label: "英语一", total: 100, questions: 52, files: 17, parsed: 880, quota: map[models.QuestionType]float64{models.TypeChoice: 70, models.TypeMajor: 30}},
-		"english2": {label: "英语二", total: 100, questions: 48, files: 17, parsed: 816, quota: map[models.QuestionType]float64{models.TypeChoice: 75, models.TypeMajor: 25}},
-		"politics": {label: "政治", total: 100, questions: 38, files: 17, parsed: 646, quota: map[models.QuestionType]float64{models.TypeChoice: 16, models.TypeMultiChoice: 34, models.TypeMajor: 50}},
+		"english1": {label: "英语一", total: 100, questions: 52, files: 17, parsed: 880, quota: map[models.QuestionType]float64{models.TypeChoice: 60, models.TypeMajor: 40}, countQuota: map[models.QuestionType]int{models.TypeChoice: 45, models.TypeMajor: 7}},
+		"english2": {label: "英语二", total: 100, questions: 48, files: 17, parsed: 816, quota: map[models.QuestionType]float64{models.TypeChoice: 60, models.TypeMajor: 40}, countQuota: map[models.QuestionType]int{models.TypeChoice: 45, models.TypeMajor: 3}},
+		"politics": {label: "政治", total: 100, questions: 38, files: 17, parsed: 646, quota: map[models.QuestionType]float64{models.TypeChoice: 16, models.TypeMultiChoice: 34, models.TypeMajor: 50}, countQuota: map[models.QuestionType]int{models.TypeChoice: 16, models.TypeMultiChoice: 17, models.TypeMajor: 5}},
 	}
 
 	for key, expected := range want {
@@ -115,6 +115,7 @@ func TestSelectableSubjectProfiles(t *testing.T) {
 
 func TestSubjectSourcesMatchBundledData(t *testing.T) {
 	for _, key := range []string{"408", "math1", "math2", "english1", "english2", "politics"} {
+		t.Logf("compose subject %s", key)
 		profile, _ := subjectProfile(key)
 		path := repoPath("data", profile.Source)
 		entries, err := os.ReadDir(path)
@@ -204,6 +205,22 @@ func TestDifficultyStrictnessIsExplicit(t *testing.T) {
 			t.Errorf("%s did not enable strict difficulty counts", name)
 		}
 	}
+	politics, err := blueprintForSubjectDifficulty("政治", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !politics.DifficultyCountStrict {
+		t.Fatal("politics subject default should enable strict difficulty counts")
+	}
+	for _, subject := range []string{"英语一", "英语二"} {
+		english, err := blueprintForSubjectDifficulty(subject, "", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !english.DifficultyCountStrict {
+			t.Fatalf("%s subject default should enable strict difficulty counts", subject)
+		}
+	}
 }
 
 func TestDifficultyCountsAreExactAndDerivedFromRatios(t *testing.T) {
@@ -245,7 +262,7 @@ func TestMath2CompositionUsesDifficultyTargets(t *testing.T) {
 	if os.Getenv("RUN_CORPUS_TESTS") != "1" {
 		t.Skip("set RUN_CORPUS_TESTS=1 to compose against the bundled math2 corpus")
 	}
-	a := newTestAPI(t)
+	a := newTestApp(t)
 	profile, _ := subjectProfile("math2")
 	parsed, err := a.parser.Parse(t.Context(), repoPath("data", profile.Source))
 	if err != nil {
@@ -277,7 +294,7 @@ func TestAllSelectableSubjectsCanComposeFromBundledQuestions(t *testing.T) {
 	if os.Getenv("RUN_CORPUS_TESTS") != "1" {
 		t.Skip("set RUN_CORPUS_TESTS=1 to compose against all bundled corpora")
 	}
-	a := newTestAPI(t)
+	a := newTestApp(t)
 	for _, key := range []string{"408", "math1", "math2", "english1", "english2", "politics"} {
 		profile, _ := subjectProfile(key)
 		parsed, err := a.parser.Parse(t.Context(), repoPath("data", profile.Source))

@@ -1,7 +1,7 @@
 package main
 
-// End-to-end orchestration on top of the per-stage API methods:
-//   - RunPipeline: stages 1→7 in one call, persisting after every stage
+// End-to-end orchestration on top of the generation stages:
+//   - runPipeline: builds a blueprint, generates a paper, validates, and assembles it
 //   - buildPaper: glues stage outputs into the final ExamPaper
 //   - repairPaper: Stage-6 repair protocol (regenerate only violated题位,
 //     ≤maxRounds, then degrade to last state + final validation report)
@@ -10,11 +10,9 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"strings"
 	"time"
 
 	"GoT0GenPaper/internal/models"
-	"GoT0GenPaper/internal/pipeline/answer"
 	"GoT0GenPaper/internal/pipeline/assembler"
 	"GoT0GenPaper/internal/pipeline/orchestrator"
 	"GoT0GenPaper/internal/pipeline/parser"
@@ -24,8 +22,8 @@ import (
 
 // PipelineRequest is the end-to-end run configuration.
 type PipelineRequest struct {
-	Source          string                 `json:"source"`          // 真题文件/目录(空=复用已解析数据)
-	Blueprint       orchestrator.Blueprint `json:"blueprint"`       // 空字段沿用 DefaultBlueprint 语义由前端控制
+	Source          string                 `json:"source"`          // 真题文件/目录(空=使用科目默认目录)
+	Blueprint       orchestrator.Blueprint `json:"blueprint"`       // 由选定科目的配置构建
 	MaxRepairRounds int                    `json:"maxRepairRounds"` // 建议≤3
 }
 
@@ -34,7 +32,6 @@ type PipelineSummary struct {
 	ParseCount   int                         `json:"parseCount"`
 	SpecCount    int                         `json:"specCount"`
 	Generated    int                         `json:"generated"`
-	Answered     int                         `json:"answered"`
 	RepairRounds int                         `json:"repairRounds"`
 	Validation   *validator.ValidationResult `json:"validation"`
 	Paper        *models.ExamPaper           `json:"paper"`
@@ -42,16 +39,15 @@ type PipelineSummary struct {
 	Warnings     []string                    `json:"warnings"`
 }
 
-// RunPipeline executes stages 1→7 in sequence.
+// runPipeline executes the paper-generation stages in sequence.
 //
 //	[1] parse (skipped when Source is empty and stored data exists)
 //	[2] GNN weights (wired into CP-SAT)
 //	[3] compose spec table
 //	[4] generate questions
-//	[5] answers + rubrics
-//	[6] validate + repair loop
-//	[7] assemble + persist LaTeX/paper artifacts
-func (a *API) RunPipeline(req PipelineRequest) (*PipelineSummary, error) {
+//	[5] validate + repair loop
+//	[6] assemble + persist the exam LaTeX and paper metadata
+func (a *app) runPipeline(req PipelineRequest) (*PipelineSummary, error) {
 	summary := &PipelineSummary{Warnings: []string{}}
 	if _, err := blueprintForSubject(req.Blueprint.Subject); err != nil {
 		return nil, fmt.Errorf("subject profile: %w", err)
@@ -59,7 +55,7 @@ func (a *API) RunPipeline(req PipelineRequest) (*PipelineSummary, error) {
 
 	useCachedParse := req.Source == ""
 	// The subject profile owns the source directory when the caller did not
-	// provide an explicit source. This keeps the UI subject switch meaningful
+	// provide an explicit source. This keeps the selected subject meaningful
 	// and avoids accidentally reusing another subject's parsed questions.
 	if req.Source == "" {
 		source, err := a.sourceForSubject(req.Blueprint.Subject)
@@ -75,7 +71,7 @@ func (a *API) RunPipeline(req PipelineRequest) (*PipelineSummary, error) {
 		// Reuse the already annotated corpus; this avoids 431 repeat LLM calls
 		// every time a paper is generated from the same subject.
 	} else if req.Source != "" {
-		if _, err := a.ParseExams(req.Source); err != nil {
+		if _, err := a.parseExams(req.Source); err != nil {
 			return nil, fmt.Errorf("stage1 parse: %w", err)
 		}
 	} else if a.lastParse == nil {
@@ -87,15 +83,9 @@ func (a *API) RunPipeline(req PipelineRequest) (*PipelineSummary, error) {
 		return nil, fmt.Errorf("stage1 parse: no past questions available")
 	}
 	questions := a.lastParse.Questions
-	if subject, ok := subjectProfile(req.Blueprint.Subject); ok && subject.Key == "math2" {
-		filtered := make([]models.PastQuestion, 0, len(questions))
-		for _, question := range questions {
-			if quality.PastQuestionInSubject(subject.Key, question) {
-				filtered = append(filtered, question)
-			}
-		}
-		questions = filtered
-		a.lastParse.Questions = append([]models.PastQuestion(nil), filtered...)
+	if subject, ok := subjectProfile(req.Blueprint.Subject); ok && (subject.Key == "math2" || subject.Key == "politics") {
+		questions = quality.FilterPastQuestions(subject.Key, questions)
+		a.lastParse.Questions = append([]models.PastQuestion(nil), questions...)
 		if err := a.attachParseArtifacts(a.lastParse); err != nil {
 			return nil, fmt.Errorf("stage1 subject filter: %w", err)
 		}
@@ -103,12 +93,12 @@ func (a *API) RunPipeline(req PipelineRequest) (*PipelineSummary, error) {
 	summary.ParseCount = len(questions)
 
 	// Stage 2: GNN weights.
-	if _, err := a.PredictWeights(questions); err != nil {
+	if _, err := a.predictWeights(questions); err != nil {
 		return nil, fmt.Errorf("stage2 gnn: %w", err)
 	}
 
 	// Stage 3: compose spec table.
-	spec, err := a.ComposeExam(req.Blueprint, questions)
+	spec, err := a.composeExam(req.Blueprint, questions)
 	if err != nil {
 		return nil, fmt.Errorf("stage3 compose: %w", err)
 	}
@@ -121,27 +111,19 @@ func (a *API) RunPipeline(req PipelineRequest) (*PipelineSummary, error) {
 	}
 
 	// Stage 4: generate questions.
-	qs, err := a.GenerateQuestions(*spec)
+	qs, err := a.generateQuestions(*spec)
 	if err != nil {
 		return nil, fmt.Errorf("stage4 generate: %w", err)
 	}
 	summary.Generated = len(qs)
 
-	// Stage 5: answers + rubrics.
-	reviews, err := a.ProduceAnswers(qs)
-	if err != nil {
-		return nil, fmt.Errorf("stage5 answers: %w", err)
-	}
-	summary.Answered = len(reviews)
 	for _, q := range qs {
 		if q.Status == "needs_review" {
 			summary.Warnings = append(summary.Warnings, fmt.Sprintf("题目 %s 生成结果需要人工复核", q.ID))
 		}
 	}
-	summary.Warnings = append(summary.Warnings, applyReviewReadiness(qs, reviews)...)
-
-	// Glue: build the paper model.
-	paper := buildPaper(*spec, qs, reviews)
+	// Assemble the generated question set as the paper model.
+	paper := buildPaper(*spec, qs)
 	paper.ID = fmt.Sprintf("paper_%d", time.Now().UnixMilli())
 
 	// Stage 6: validate + repair loop.
@@ -161,7 +143,7 @@ func (a *API) RunPipeline(req PipelineRequest) (*PipelineSummary, error) {
 	}
 
 	// Stage 7: assemble + persist.
-	out, err := a.AssemblePaper(paper)
+	out, err := a.assemblePaper(paper)
 	if err != nil {
 		return nil, fmt.Errorf("stage7 assemble: %w", err)
 	}
@@ -179,66 +161,15 @@ func cachedParseMatchesSubject(parsed *parser.ParseResult, subject string) bool 
 		if question.Subject != profile.Key && question.Source != profile.Key {
 			return false
 		}
+		if profile.Key == "politics" && !quality.IsPoliticsPointSet(question.Points) {
+			return false
+		}
 	}
 	return true
 }
 
-// applyReviewReadiness joins answer-stage results by stable question ID. The
-// generator and answer service normally preserve order, but positional joins
-// can mark the wrong question when a caller retries, filters, or reorders a
-// batch. Any missing, duplicate, mismatched, or non-finalised review blocks
-// that question from becoming a deliverable.
-func applyReviewReadiness(qs []models.GeneratedQuestion, reviews []*answer.ReviewResult) []string {
-	warnings := make([]string, 0)
-	byID := make(map[string]int, len(qs))
-	for i := range qs {
-		if _, exists := byID[qs[i].ID]; exists || strings.TrimSpace(qs[i].ID) == "" {
-			qs[i].Status = "needs_review"
-			qs[i].Warnings = append(qs[i].Warnings, "题目 ID 缺失或重复")
-			continue
-		}
-		byID[qs[i].ID] = i
-	}
-	reviewByID := make(map[string]*answer.ReviewResult, len(reviews))
-	duplicates := make(map[string]bool)
-	for _, review := range reviews {
-		if review == nil {
-			continue
-		}
-		id := strings.TrimSpace(review.Rubric.QuestionID)
-		if id == "" {
-			id = strings.TrimSpace(review.Question.ID)
-		}
-		if _, known := byID[id]; !known || id == "" {
-			warnings = append(warnings, fmt.Sprintf("收到未知或缺少题目 ID 的评分结果(%s)", id))
-			continue
-		}
-		if _, exists := reviewByID[id]; exists {
-			duplicates[id] = true
-			continue
-		}
-		reviewByID[id] = review
-	}
-	for i := range qs {
-		id := qs[i].ID
-		review, exists := reviewByID[id]
-		if !exists {
-			qs[i].Status = "needs_review"
-			qs[i].Warnings = append(qs[i].Warnings, "缺少标准答案评分结果")
-			warnings = append(warnings, fmt.Sprintf("题目 %s 缺少标准答案评分结果", id))
-			continue
-		}
-		if duplicates[id] || review.Rubric.QuestionID != "" && review.Rubric.QuestionID != id || !review.Finalised {
-			qs[i].Status = "needs_review"
-			qs[i].Warnings = append(qs[i].Warnings, "标准答案未完成独立校验或评分结果重复")
-			warnings = append(warnings, fmt.Sprintf("题目 %s 的评分标准未完成独立校验", id))
-		}
-	}
-	return warnings
-}
-
 // buildPaper glues stage outputs into the final ExamPaper model.
-func buildPaper(spec models.SpecTable, qs []models.GeneratedQuestion, reviews []*answer.ReviewResult) models.ExamPaper {
+func buildPaper(spec models.SpecTable, qs []models.GeneratedQuestion) models.ExamPaper {
 	paper := models.ExamPaper{
 		Subject:   spec.Subject,
 		Questions: append([]models.GeneratedQuestion(nil), qs...),
@@ -249,48 +180,13 @@ func buildPaper(spec models.SpecTable, qs []models.GeneratedQuestion, reviews []
 		total += q.Score
 	}
 	paper.TotalScore = total
-	byQuestion := make(map[string]*answer.ReviewResult, len(reviews))
-	duplicate := make(map[string]bool)
-	for _, review := range reviews {
-		if review == nil {
-			continue
-		}
-		id := strings.TrimSpace(review.Rubric.QuestionID)
-		if id == "" {
-			id = strings.TrimSpace(review.Question.ID)
-		}
-		if id == "" {
-			continue
-		}
-		if _, exists := byQuestion[id]; exists {
-			duplicate[id] = true
-			continue
-		}
-		byQuestion[id] = review
-	}
-	for i := range paper.Questions {
-		q := &paper.Questions[i]
-		review, exists := byQuestion[q.ID]
-		if !exists || duplicate[q.ID] {
-			q.Status = "needs_review"
-			q.Warnings = append(q.Warnings, "标准答案结果缺失或重复，需人工复核")
-			continue
-		}
-		if strings.TrimSpace(review.Rubric.QuestionID) != "" && review.Rubric.QuestionID != q.ID {
-			q.Status = "needs_review"
-			q.Warnings = append(q.Warnings, "评分标准与题目 ID 不一致")
-			continue
-		}
-		paper.Rubrics = append(paper.Rubrics, review.Rubric)
-	}
 	return paper
 }
 
-// repairPaper runs the Stage-6 repair protocol: validate → regenerate only
-// violated题位 (Stage 4 re-run per spec entry) → re-answer → re-validate.
+// repairPaper runs the validation loop and regenerates only violated question slots.
 // After maxRounds it degrades: the paper is returned as-is with the final
 // validation result so the caller (or user) can decide.
-func (a *API) repairPaper(ctx context.Context, paper models.ExamPaper, bp *orchestrator.Blueprint, maxRounds int) (models.ExamPaper, *validator.ValidationResult, int, error) {
+func (a *app) repairPaper(ctx context.Context, paper models.ExamPaper, bp *orchestrator.Blueprint, maxRounds int) (models.ExamPaper, *validator.ValidationResult, int, error) {
 	var lastVal *validator.ValidationResult
 	for round := 0; round < maxRounds; round++ {
 		val, err := a.validator.Validate(ctx, paper, bp)
@@ -322,10 +218,8 @@ func (a *API) repairPaper(ctx context.Context, paper models.ExamPaper, bp *orche
 	return paper, val, maxRounds, nil
 }
 
-// regenerateSlots re-generates only the requested spec entries and replaces
-// their matching questions/rubrics in place. The paper order and all other
-// questions remain unchanged.
-func (a *API) regenerateSlots(ctx context.Context, paper *models.ExamPaper, specIDs []string) bool {
+// regenerateSlots regenerates only the requested entries; all other questions remain unchanged.
+func (a *app) regenerateSlots(ctx context.Context, paper *models.ExamPaper, specIDs []string) bool {
 	if paper == nil || len(specIDs) == 0 {
 		return false
 	}
@@ -344,19 +238,9 @@ func (a *API) regenerateSlots(ctx context.Context, paper *models.ExamPaper, spec
 		if !ok {
 			continue
 		}
-		nq, err := a.gen.Generate(ctx, entry)
+		nq, err := a.gen.GenerateForSubject(ctx, paper.Subject, entry)
 		if err != nil {
 			continue
-		}
-		if review, err := a.ans.ProduceAnswer(ctx, nq); err == nil && review != nil {
-			a.replaceRubric(paper, review.Rubric)
-			if !review.Finalised {
-				nq.Status = "needs_review"
-				nq.Warnings = append(nq.Warnings, "修复后的标准答案未完成独立校验")
-			}
-		} else {
-			nq.Status = "needs_review"
-			nq.Warnings = append(nq.Warnings, "修复后的标准答案生成失败，需人工复核")
 		}
 		if replaceQuestionForSpec(paper, sid, nq) {
 			repaired = true
@@ -411,15 +295,4 @@ func sumPaperQuestionScores(questions []models.GeneratedQuestion) float64 {
 		}
 	}
 	return total
-}
-
-// replaceRubric upserts a rubric in the paper by QuestionID.
-func (a *API) replaceRubric(paper *models.ExamPaper, rubric models.Rubric) {
-	for i := range paper.Rubrics {
-		if paper.Rubrics[i].QuestionID == rubric.QuestionID {
-			paper.Rubrics[i] = rubric
-			return
-		}
-	}
-	paper.Rubrics = append(paper.Rubrics, rubric)
 }

@@ -340,7 +340,7 @@ func (p *Parser) parseFile(path string) ([]models.PastQuestion, error) {
 				qNum, _ := strconv.Atoi(qb.Header)
 				qCounter++
 
-				q := buildQuestion(base, path, subject, subjectCategory, info.header,
+				q := buildQuestion(base, path, subject, subjectCategory, sec.Header, info.header,
 					year, qCounter, qNum, secType, secScorePerQ, info.perQ, info.auth,
 					info.fallbackStem, qb.Body, source, subjectFromYAML)
 
@@ -800,15 +800,19 @@ func splitRangeQuestions(body string, startNum, endNum int) []questionBlock {
 }
 
 // buildQuestion constructs a PastQuestion from parsed components.
-func buildQuestion(baseFile, fullPath, subject, subjectCategory, category string,
+func buildQuestion(baseFile, fullPath, subject, subjectCategory, section, category string,
 	year, counter, qNum int, qType models.QuestionType, secScorePerQ, catScorePerQ float64,
 	catScoreAuth bool, fallbackStem, body, source, yamlTitle string) models.PastQuestion {
+	qType = englishQuestionType(subject, section, category, qType)
 
 	// Extract answer from structured markers.
 	answer := extractAnswer(body)
 
 	// Extract knowledge-point tags.
 	points := extractTags(body)
+	if len(points) == 0 && isEnglishSubject(subject) {
+		points = englishQuestionPoints(subject, section, category, qNum)
+	}
 
 	// Extract stem: everything before the first structured marker.
 	stem := extractStem(body)
@@ -818,6 +822,9 @@ func buildQuestion(baseFile, fullPath, subject, subjectCategory, category string
 	// (Directions + passage) as stem context.
 	if strings.Trim(stem, "* \t\n\r0123456789.、：:【】()（）") == "" {
 		stem = fallbackStem
+	}
+	if len(points) == 0 && isPoliticsSubject(subject) {
+		points = politicsKnowledgePoints(strings.Join([]string{stem, answer, body, category}, "\n"))
 	}
 
 	// Extract choice options if applicable.
@@ -835,7 +842,9 @@ func buildQuestion(baseFile, fullPath, subject, subjectCategory, category string
 
 	// Template key: type_firstPoint (or type_category).
 	tplKey := fmt.Sprintf("%s_%s", qType, "default")
-	if len(points) > 0 {
+	if isEnglishSubject(subject) {
+		tplKey = fmt.Sprintf("%s_%s", qType, category)
+	} else if len(points) > 0 {
 		tplKey = fmt.Sprintf("%s_%s", qType, points[0])
 	} else if category != "" {
 		tplKey = fmt.Sprintf("%s_%s", qType, category)
@@ -859,6 +868,105 @@ func buildQuestion(baseFile, fullPath, subject, subjectCategory, category string
 		Answer:      answer,
 		Options:     options,
 		TemplateKey: tplKey,
+	}
+}
+
+func isEnglishSubject(subject string) bool {
+	return subject == "english1" || subject == "english2"
+}
+
+func isPoliticsSubject(subject string) bool {
+	return strings.EqualFold(strings.TrimSpace(subject), "politics") || strings.TrimSpace(subject) == "政治"
+}
+
+type politicsTopicRule struct {
+	module   string
+	topic    string
+	keywords []string
+}
+
+var politicsTopicRules = []politicsTopicRule{
+	{"马克思主义基本原理", "唯物辩证法与矛盾分析", []string{"唯物辩证法", "矛盾分析法", "矛盾的同一性", "矛盾的斗争性", "矛盾普遍性", "矛盾特殊性", "质量互变", "否定之否定", "联系和发展", "系统思维"}},
+	{"马克思主义基本原理", "马克思主义认识论", []string{"认识论", "实践是检验真理", "实践与认识", "真理的绝对性", "真理的相对性", "认识运动", "认识过程", "感性认识", "理性认识"}},
+	{"马克思主义基本原理", "唯物史观与人民群众", []string{"唯物史观", "人民群众是历史", "人民群众创造历史", "社会存在", "社会意识", "社会基本矛盾", "生产力和生产关系", "经济基础和上层建筑", "历史人物", "群众路线"}},
+	{"马克思主义基本原理", "马克思主义政治经济学", []string{"政治经济学", "商品", "使用价值", "价值规律", "劳动价值论", "劳动二重性", "剩余价值", "资本积累", "资本主义经济", "经济危机", "货币"}},
+	{"马克思主义基本原理", "科学社会主义", []string{"科学社会主义", "空想社会主义", "无产阶级革命", "共产主义社会", "帝国主义", "列宁", "社会主义代替资本主义"}},
+	{"马克思主义基本原理", "马克思主义哲学基本问题", []string{"马克思主义哲学", "物质和意识", "世界的物质统一性", "运动和静止", "时空", "唯物论", "辩证唯物主义"}},
+	{"毛泽东思想和中国特色社会主义理论体系概论", "新民主主义革命理论", []string{"新民主主义革命", "农村包围城市", "统一战线", "武装斗争", "党的建设", "新民主主义社会", "中国革命道路"}},
+	{"毛泽东思想和中国特色社会主义理论体系概论", "毛泽东思想活的灵魂", []string{"毛泽东思想", "实事求是", "群众路线", "独立自主", "《论本本主义》", "《实践论》", "《矛盾论》"}},
+	{"毛泽东思想和中国特色社会主义理论体系概论", "社会主义改造与建设探索", []string{"社会主义改造", "过渡时期总路线", "社会主义建设道路", "社会主义基本制度", "新中国成立初期", "三大改造"}},
+	{"毛泽东思想和中国特色社会主义理论体系概论", "邓小平理论与改革开放", []string{"邓小平理论", "改革开放", "社会主义初级阶段", "社会主义本质", "一个中心、两个基本点", "南方谈话", "解放思想"}},
+	{"毛泽东思想和中国特色社会主义理论体系概论", "中国特色社会主义理论体系", []string{"中国特色社会主义理论体系", "三个代表重要思想", "科学发展观", "中国特色社会主义道路", "中国特色社会主义制度"}},
+	{"习近平新时代中国特色社会主义思想概论", "习近平新时代中国特色社会主义思想", []string{"习近平新时代中国特色社会主义思想", "新时代中国特色社会主义思想", "两个确立", "两个维护", "十个明确", "十四个坚持", "六个必须坚持"}},
+	{"习近平新时代中国特色社会主义思想概论", "中国式现代化", []string{"中国式现代化", "现代化强国", "民族复兴", "第二个百年奋斗目标"}},
+	{"习近平新时代中国特色社会主义思想概论", "新发展理念与高质量发展", []string{"新发展理念", "高质量发展", "新发展格局", "新质生产力", "供给侧结构性改革", "大农业观", "大食物观", "高水平对外开放", "制度型开放"}},
+	{"习近平新时代中国特色社会主义思想概论", "共同富裕与民生发展", []string{"共同富裕", "美好生活", "民生", "社会保障", "乡村振兴", "区域协调发展"}},
+	{"习近平新时代中国特色社会主义思想概论", "文化自信与文明发展", []string{"文化自信", "文化主体性", "中华优秀传统文化", "两个结合", "中华文明", "文化强国"}},
+	{"习近平新时代中国特色社会主义思想概论", "党的全面领导与全过程人民民主", []string{"党的全面领导", "党的领导", "全过程人民民主", "人民当家作主", "全面从严治党", "党的建设", "自我革命"}},
+	{"中国近现代史纲要", "近代中国社会与革命", []string{"鸦片战争", "近代中国", "半殖民地半封建", "辛亥革命", "洋务运动", "戊戌变法", "实业救国"}},
+	{"中国近现代史纲要", "新民主主义革命史", []string{"五四运动", "中国共产党成立", "中共一大", "土地革命", "长征", "抗日战争", "抗日民族统一战线", "解放战争", "新民主主义革命胜利"}},
+	{"中国近现代史纲要", "社会主义革命建设与改革开放史", []string{"中华人民共和国成立", "新中国成立", "抗美援朝", "社会主义建设时期", "改革开放史", "党的十一届三中全会", "社会主义革命和建设"}},
+	{"思想道德与法治", "理想信念与中国精神", []string{"理想信念", "中国精神", "爱国主义", "民族精神", "时代精神", "人生观", "人生价值", "价值观"}},
+	{"思想道德与法治", "社会主义核心价值观", []string{"社会主义核心价值观", "核心价值观", "道德建设", "道德修养", "社会公德", "职业道德", "家庭美德", "个人品德", "集体主义"}},
+	{"思想道德与法治", "法治思维与法律基础", []string{"法治思维", "法律至上", "宪法", "法治社会", "依法治国", "权利和义务", "法律权利", "法律义务", "法治中国"}},
+	{"形势与政策以及当代世界经济与政治", "国际关系与全球治理", []string{"联合国", "多边主义", "人类命运共同体", "全球治理", "国际秩序", "国际关系", "世界和平", "全球发展倡议", "全球安全倡议", "全球文明倡议"}},
+	{"形势与政策以及当代世界经济与政治", "区域合作与国际组织", []string{"金砖", "二十国集团", "G20", "上海合作组织", "一带一路", "亚太经合组织", "中非合作论坛", "国际组织"}},
+	{"形势与政策以及当代世界经济与政治", "年度形势与政策", []string{"形势与政策", "时政", "国际形势", "国际经济", "世界经济", "气候变化", "全球南方", "粮食安全", "能源安全"}},
+}
+
+func politicsKnowledgePoints(text string) []string {
+	bestScore := 0
+	best := politicsTopicRules[0]
+	for _, rule := range politicsTopicRules {
+		score := 0
+		for _, keyword := range rule.keywords {
+			if strings.Contains(text, keyword) {
+				// Longer, more specific phrases carry more weight than broad terms.
+				score += len([]rune(keyword))
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			best = rule
+		}
+	}
+	if bestScore == 0 {
+		return []string{"马克思主义基本原理", "马克思主义理论综合"}
+	}
+	return []string{best.module, best.topic}
+}
+
+func englishQuestionType(subject, section, category string, fallback models.QuestionType) models.QuestionType {
+	if !isEnglishSubject(subject) {
+		return fallback
+	}
+	sectionLower := strings.ToLower(strings.TrimSpace(section))
+	categoryLower := strings.ToLower(strings.TrimSpace(category))
+	if strings.Contains(sectionLower, "阅读") && strings.Contains(categoryLower, "part c") {
+		return models.TypeMajor
+	}
+	return fallback
+}
+
+func englishQuestionPoints(subject, section, category string, qNum int) []string {
+	sectionLower := strings.ToLower(strings.TrimSpace(section))
+	categoryLower := strings.ToLower(strings.TrimSpace(category))
+	position := fmt.Sprintf("题位%d", qNum)
+	switch {
+	case strings.Contains(sectionLower, "完形"):
+		return []string{subject, "完形填空", "语篇词汇与语境", position}
+	case strings.Contains(sectionLower, "阅读") && strings.Contains(categoryLower, "part c"):
+		return []string{subject, "翻译", "英译汉", position}
+	case strings.Contains(sectionLower, "阅读") && strings.Contains(categoryLower, "part b"):
+		return []string{subject, "阅读理解", "Part B", "人物观点匹配", position}
+	case strings.Contains(sectionLower, "阅读"):
+		return []string{subject, "阅读理解", "Part A", category, position}
+	case strings.Contains(sectionLower, "写作") && strings.Contains(categoryLower, "part a"):
+		return []string{subject, "写作", "应用文", position}
+	case strings.Contains(sectionLower, "写作"):
+		return []string{subject, "写作", "图表或主题作文", position}
+	default:
+		return []string{subject, section, category, position}
 	}
 }
 
@@ -1223,6 +1331,20 @@ func typeDefaultScore(t models.QuestionType) float64 {
 func (p *Parser) Annotate(ctx context.Context, q models.PastQuestion) (models.PastQuestion, error) {
 	// If we already have tags from structured data, keep them.
 	hasTags := len(q.Points) > 0 && q.Points[0] != "unknown"
+	if isPoliticsSubject(q.Subject) {
+		if !hasTags {
+			q.Points = politicsKnowledgePoints(strings.Join([]string{q.Stem, q.Answer, strings.Join(q.Options, "\n")}, "\n"))
+		}
+		q.Difficulty = 0.55
+		q.DifficultyConfidence = 0.5
+		if q.Cognitive == "" {
+			q.Cognitive = models.CogAnalyze
+		}
+		if q.TemplateKey == "" {
+			q.TemplateKey = fmt.Sprintf("%s_%s", q.Type, q.Points[0])
+		}
+		return q, nil
+	}
 
 	if p.LLM == nil {
 		// Without LLM, use heuristic defaults.

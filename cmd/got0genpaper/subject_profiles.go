@@ -55,13 +55,13 @@ var selectableSubjects = []SubjectProfile{
 		DisciplineOrder: []string{"高等数学", "线性代数"}, ExamFiles: 19, ParsedQuestions: 431, DataAvailable: true,
 		SyllabusStatus: "结构已核验", SyllabusNote: "已抓取 2026 版数学二公开章节结构；完整官方出版物未纳入项目"},
 	{Key: "english1", Label: "英语一", Source: filepath.Join("exams", "csgraduates", "english", "english1"), TotalScore: 100, NumQuestions: 52,
-		TypeQuota: map[models.QuestionType]float64{models.TypeChoice: 70, models.TypeMajor: 30}, ExamFiles: 17, ParsedQuestions: 880, DataAvailable: true,
+		TypeQuota: map[models.QuestionType]float64{models.TypeChoice: 60, models.TypeMajor: 40}, TypeCountQuota: map[models.QuestionType]int{models.TypeChoice: 45, models.TypeMajor: 7}, ExamFiles: 17, ParsedQuestions: 880, DataAvailable: true,
 		SyllabusStatus: "部分核验", SyllabusNote: "已抓取 2026 版公开结构；词汇附录和官方全文未核验"},
 	{Key: "english2", Label: "英语二", Source: filepath.Join("exams", "csgraduates", "english", "english2"), TotalScore: 100, NumQuestions: 48,
-		TypeQuota: map[models.QuestionType]float64{models.TypeChoice: 75, models.TypeMajor: 25}, ExamFiles: 17, ParsedQuestions: 816, DataAvailable: true,
+		TypeQuota: map[models.QuestionType]float64{models.TypeChoice: 60, models.TypeMajor: 40}, TypeCountQuota: map[models.QuestionType]int{models.TypeChoice: 45, models.TypeMajor: 3}, ExamFiles: 17, ParsedQuestions: 816, DataAvailable: true,
 		SyllabusStatus: "部分核验", SyllabusNote: "已抓取 2026 版公开结构；词汇附录和官方全文未核验"},
 	{Key: "politics", Label: "政治", Source: filepath.Join("exams", "csgraduates", "politics"), TotalScore: 100, NumQuestions: 38,
-		TypeQuota: map[models.QuestionType]float64{models.TypeChoice: 16, models.TypeMultiChoice: 34, models.TypeMajor: 50}, ExamFiles: 17, ParsedQuestions: 646, DataAvailable: true,
+		TypeQuota: map[models.QuestionType]float64{models.TypeChoice: 16, models.TypeMultiChoice: 34, models.TypeMajor: 50}, TypeCountQuota: map[models.QuestionType]int{models.TypeChoice: 16, models.TypeMultiChoice: 17, models.TypeMajor: 5}, ExamFiles: 17, ParsedQuestions: 646, DataAvailable: true,
 		SyllabusStatus: "年度过渡", SyllabusNote: "已抓取 2027 公开页面；页面注明正式版本发布后仍会更新"},
 }
 
@@ -140,7 +140,10 @@ func blueprintForSubjectDifficulty(subject, preset, histogram, counts string) (o
 	}
 	var diffHist map[models.DifficultyBand]float64
 	var diffCounts map[models.DifficultyBand]int
-	strictDifficulty := strings.TrimSpace(histogram) != "" || strings.TrimSpace(counts) != "" || !isDefaultDifficultyPreset(preset)
+	// Political papers have a fixed annual-style structure and need the
+	// default difficulty contract to survive model self-reports that collapse
+	// every item to the middle of the range.
+	strictDifficulty := p.Key == "politics" || p.Key == "english1" || p.Key == "english2" || strings.TrimSpace(histogram) != "" || strings.TrimSpace(counts) != "" || !isDefaultDifficultyPreset(preset)
 	var err error
 	if strings.TrimSpace(counts) != "" {
 		diffCounts, err = parseDifficultyCounts(counts, p.NumQuestions)
@@ -376,7 +379,7 @@ func difficultyCountView(counts map[models.DifficultyBand]int) map[string]int {
 	}
 }
 
-func (a *API) sourceForSubject(subject string) (string, error) {
+func (a *app) sourceForSubject(subject string) (string, error) {
 	p, ok := subjectProfile(subject)
 	if !ok {
 		return "", fmt.Errorf("不支持的科目 %q", subject)

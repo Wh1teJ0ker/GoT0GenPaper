@@ -1,6 +1,7 @@
 {{%define "document_preamble"%}}\documentclass[12pt]{ctexart}
 \usepackage[a4paper,top=2.4cm,bottom=2.4cm,left=2.4cm,right=2.4cm]{geometry}
 \usepackage{amsmath,amssymb}
+\usepackage{array,tabularx}
 \usepackage{fancyhdr}
 \usepackage{lastpage}
 \usepackage{newunicodechar}
@@ -16,6 +17,10 @@
 \newunicodechar{Ⅱ}{\ensuremath{\mathrm{II}}}
 \newunicodechar{Ⅲ}{\ensuremath{\mathrm{III}}}
 \newunicodechar{Ⅳ}{\ensuremath{\mathrm{IV}}}
+\newunicodechar{①}{\textcircled{1}}
+\newunicodechar{②}{\textcircled{2}}
+\newunicodechar{③}{\textcircled{3}}
+\newunicodechar{④}{\textcircled{4}}
 %% OCR 常把拉丁字母 P 识别为西里尔字母 Р — 保留为可见的拉丁 P
 \newunicodechar{Р}{P}
 \newunicodechar{ }{\hspace{1em}}

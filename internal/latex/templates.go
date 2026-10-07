@@ -1,5 +1,4 @@
-// Package latex provides LaTeX document generation for exam papers, answer
-// keys, and answer sheets.
+// Package latex provides LaTeX document generation for printable exam papers.
 package latex
 
 import (
@@ -23,13 +22,7 @@ var (
 // requiredTemplateNames is the contract of the external template directory.
 // A malformed configuration should fail at startup, not during rendering.
 var requiredTemplateNames = []string{
-	"answer_block",
-	"answer_sheet",
-	"answer_sheet_bubble_grid",
-	"answer_sheet_bubble_group",
-	"answer_sheet_info_row",
-	"answer_sheet_notice",
-	"answers_document",
+	"cloze_question",
 	"choice_options",
 	"choice_question",
 	"document_preamble",
@@ -148,8 +141,14 @@ type ExamMeta struct {
 
 // escapeLaTeX escapes text outside math segments while retaining math markup.
 func escapeLaTeX(s string) string {
+	s = normalizeTeXControlCharacters(s)
+	s = normalizePreEscapedSpecialCharacters(s)
+	s = normalizeCasesNewlineEscapes(s)
 	s = normalizeDisplayMathWhitespace(s)
 	s = normalizeFillBlankMarkers(s)
+	s = normalizeLongTextUnderlines(s)
+	s = normalizeGeneratedTables(s)
+	s = normalizeTextWrappers(s)
 	s = normalizeUnicodeLookalikes(s)
 	var b strings.Builder
 	mathDelimiter := ""
@@ -226,8 +225,28 @@ func escapeLaTeX(s string) string {
 			i++
 			continue
 		}
-		if r == '\\' && i+1 < len(runes) && runes[i+1] == '$' && mathDelimiter == "" {
-			b.WriteString(`\$`)
+		if r == '\\' && i+1 < len(runes) && strings.ContainsRune(`%&#_^~$`, runes[i+1]) {
+			// Preserve a special character that was already escaped by the
+			// source or the model. Escaping its second rune again would emit
+			// invalid TeX such as `ack\\\\_seq`.
+			special := runes[i+1]
+			switch special {
+			case '^':
+				if mathDelimiter == "" {
+					b.WriteString(`\textasciicircum{}`)
+				} else {
+					b.WriteRune('^')
+				}
+			case '~':
+				if mathDelimiter == "" {
+					b.WriteString(`\textasciitilde{}`)
+				} else {
+					b.WriteString(`\sim`)
+				}
+			default:
+				b.WriteByte('\\')
+				b.WriteRune(special)
+			}
 			i++
 			continue
 		}
@@ -303,6 +322,166 @@ func escapeLaTeX(s string) string {
 	return b.String()
 }
 
+// normalizeLongTextUnderlines prevents generated translation passages from
+// becoming one unbreakable TeX box. LaTeX's underline command cannot wrap a
+// long sentence across lines; bold text keeps the target sentence visible and
+// allows normal line breaking. Short answer blanks remain underlined.
+func normalizeLongTextUnderlines(s string) string {
+	const marker = `\underline{`
+	offset := 0
+	for {
+		relative := strings.Index(s[offset:], marker)
+		if relative < 0 {
+			return s
+		}
+		start := offset + relative
+		open := start + len(`\underline`)
+		end := balancedBraceEnd(s, open)
+		if end < 0 {
+			return s
+		}
+		content := s[open+1 : end]
+		if utf8.RuneCountInString(content) <= 80 {
+			offset = end + 1
+			continue
+		}
+		replacement := `\textbf{` + content + `}`
+		s = s[:start] + replacement + s[end+1:]
+		offset = start + len(replacement)
+	}
+}
+
+// normalizeGeneratedTables converts raw table environments from model output
+// into ordinary, line-breakable text. Generated table syntax is often
+// incomplete (escaped alignment markers, row breaks before percent signs, or
+// a float at the end of the document); preserving it verbatim can make XeTeX
+// fail with an unrelated prevdepth error. Cell contents remain visible.
+func normalizeGeneratedTables(s string) string {
+	const begin = `\begin{table}`
+	const endMarker = `\end{table}`
+	for {
+		start := strings.Index(s, begin)
+		if start < 0 {
+			return s
+		}
+		relativeEnd := strings.Index(s[start:], endMarker)
+		if relativeEnd < 0 {
+			return s
+		}
+		end := start + relativeEnd + len(endMarker)
+		block := s[start:end]
+		block = regexp.MustCompile(`\\begin\{table\}(?:\[[^]]*\])?|\\end\{table\}`).ReplaceAllString(block, "")
+		block = regexp.MustCompile(`\\begin\{tabular\}\{[^{}]*\}|\\end\{tabular\}`).ReplaceAllString(block, "")
+		block = strings.ReplaceAll(block, `\centering`, "")
+		block = regexp.MustCompile(`\\caption\{[^{}]*\}`).ReplaceAllString(block, "")
+		block = strings.ReplaceAll(block, `\hline`, "")
+		block = strings.ReplaceAll(block, `\&`, " / ")
+		block = strings.ReplaceAll(block, "&", " / ")
+		block = strings.ReplaceAll(block, `\\`, "; ")
+		// A source row may contain a single escaped percent after the row
+		// separator has been flattened. Remove that source escape here so the
+		// normal LaTeX escaper adds exactly one, not two.
+		block = regexp.MustCompile(`\\+%`).ReplaceAllString(block, "%")
+		block = regexp.MustCompile(`\\+\s*$`).ReplaceAllString(block, "")
+		block = strings.Join(strings.Fields(block), " ")
+		if block == "" {
+			block = "（图表数据见题面）"
+		} else {
+			block = "Chart data: " + block
+		}
+		s = s[:start] + block + s[end:]
+	}
+}
+
+// normalizeCasesNewlineEscapes repairs a common flattened-JSON form of a
+// cases environment: "\\begin{cases}\\nk_1 ...". Only known row starters and
+// row separators are changed, so genuine commands such as \\neq remain intact.
+func normalizeCasesNewlineEscapes(s string) string {
+	const begin = `\begin{cases}`
+	const end = `\end{cases}`
+	for {
+		start := strings.Index(s, begin)
+		if start < 0 {
+			return s
+		}
+		endOffset := strings.Index(s[start+len(begin):], end)
+		if endOffset < 0 {
+			return s
+		}
+		end := start + len(begin) + endOffset + len(end)
+		region := s[start:end]
+		for _, row := range []string{"k", "x", "y", "z"} {
+			marker := `\n` + row
+			region = strings.ReplaceAll(region, marker, "\n"+row)
+		}
+		for _, command := range []string{`\vdots`, `\cdots`} {
+			marker := `\n` + command
+			region = strings.ReplaceAll(region, marker, "\n"+command)
+		}
+		s = s[:start] + region + s[end:]
+		return s
+	}
+}
+
+// normalizeTeXControlCharacters repairs control bytes that can appear when a
+// JSON answer contains a LaTeX command such as "\\frac" or "\\partial" but
+// was decoded by a producer that interpreted the command's escape prefix.
+// Newlines and tabs are preserved or normalized; other control bytes are
+// invalid in a generated .tex source and are removed.
+func normalizeTeXControlCharacters(s string) string {
+	s = strings.ReplaceAll(s, "\f"+"rac", `\frac`)
+	s = strings.ReplaceAll(s, "\\\x00partial", `\partial`)
+	s = strings.ReplaceAll(s, "\x00partial", `\partial`)
+
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '\n':
+			b.WriteRune(r)
+		case '\r':
+			b.WriteByte('\n')
+		case '\t':
+			b.WriteByte(' ')
+		default:
+			if r < 0x20 || r == 0x7f {
+				b.WriteByte(' ')
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// normalizePreEscapedSpecialCharacters collapses duplicate escape prefixes
+// before TeX special characters. This handles flattened or hand-authored
+// source such as `ack\\_seq` while leaving ordinary commands such as
+// `\\frac` and line-break commands untouched.
+func normalizePreEscapedSpecialCharacters(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\\' {
+			start := i
+			for i < len(s) && s[i] == '\\' {
+				i++
+			}
+			if i < len(s) && strings.ContainsRune(`%&#_^~$`, rune(s[i])) {
+				b.WriteByte('\\')
+				b.WriteByte(s[i])
+				i++
+				continue
+			}
+			b.WriteString(s[start:i])
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 func normalizeDisplayMathWhitespace(s string) string {
 	// A blank line immediately after/before a display delimiter can terminate
 	// the paragraph before TeX sees the matching delimiter, especially around
@@ -312,6 +491,93 @@ func normalizeDisplayMathWhitespace(s string) string {
 	s = strings.ReplaceAll(s, "\\[\n\n", "\\[\n")
 	s = strings.ReplaceAll(s, "\n\n\\]", "\n\\]")
 	return s
+}
+
+// normalizeTextWrappers unwraps \text{...} used by some English generations
+// around ordinary prose. Outside math, the wrapper prevents normal line
+// breaking and can create enormous overfull boxes; inside math it remains
+// meaningful and is preserved.
+func normalizeTextWrappers(s string) string {
+	var out strings.Builder
+	mathDelimiter := ""
+	for i := 0; i < len(s); i++ {
+		if mathDelimiter == "" {
+			unwrapped := false
+			for _, command := range []string{`\text{`, `\textit{`, `\emph{`} {
+				if !strings.HasPrefix(s[i:], command) {
+					continue
+				}
+				open := i + len(command) - 1
+				if end := balancedBraceEnd(s, open); end >= 0 {
+					out.WriteString(s[open+1 : end])
+					i = end
+					unwrapped = true
+				}
+				break
+			}
+			if unwrapped {
+				continue
+			}
+		}
+		if s[i] == '\\' && i+1 < len(s) && strings.ContainsRune("[]()", rune(s[i+1])) {
+			delimiter := s[i : i+2]
+			if delimiter == `\[` || delimiter == `\(` {
+				mathDelimiter = delimiter
+			} else if (delimiter == `\]` && mathDelimiter == `\[`) || (delimiter == `\)` && mathDelimiter == `\(`) {
+				mathDelimiter = ""
+			}
+			out.WriteString(delimiter)
+			i++
+			continue
+		}
+		if s[i] == '$' {
+			if i+1 < len(s) && s[i+1] == '$' {
+				if mathDelimiter == "" {
+					mathDelimiter = "$$"
+				} else if mathDelimiter == "$$" {
+					mathDelimiter = ""
+				}
+				out.WriteString("$$")
+				i++
+				continue
+			}
+			if mathDelimiter == "" {
+				mathDelimiter = "$"
+			} else if mathDelimiter == "$" {
+				mathDelimiter = ""
+			}
+		}
+		out.WriteByte(s[i])
+	}
+	return out.String()
+}
+
+func balancedBraceEnd(s string, open int) int {
+	if open < 0 || open >= len(s) || s[open] != '{' {
+		return -1
+	}
+	depth := 0
+	escaped := false
+	for i := open; i < len(s); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if s[i] == '\\' {
+			escaped = true
+			continue
+		}
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 var (
@@ -437,8 +703,11 @@ func optionRows(options []string) []renderedOptionRow {
 	const labels = "ABCDEFGH"
 	layout := decideOptionLayout(options)
 	perRow := len(options)
-	if layout == optionsInline2 {
+	switch layout {
+	case optionsInline2:
 		perRow = 2
+	case optionsStacked:
+		perRow = 1
 	}
 	if perRow == 0 {
 		return nil
@@ -528,7 +797,7 @@ func CleanMarkdownStem(s string) string {
 	normalized.Grow(len(result))
 	for i := 0; i < len(result); i++ {
 		if result[i] == '\\' && i+1 < len(result) && result[i+1] == 'n' &&
-			(i+2 >= len(result) || !isASCIILetter(result[i+2])) {
+			!isKnownNCommand(result, i+1) {
 			normalized.WriteByte('\n')
 			i++
 			continue
@@ -536,6 +805,27 @@ func CleanMarkdownStem(s string) string {
 		normalized.WriteByte(result[i])
 	}
 	return strings.TrimSpace(normalized.String())
+}
+
+// isKnownNCommand distinguishes a literal JSON-style "\\nWord" newline from
+// a real TeX command whose name starts with n (for example \\neq or \\nu).
+// Generated prose commonly starts the next line with an ASCII word, so a
+// generic "next byte is a letter" check is not sufficient.
+func isKnownNCommand(s string, nIndex int) bool {
+	if nIndex < 0 || nIndex >= len(s) || s[nIndex] != 'n' {
+		return false
+	}
+	end := nIndex + 1
+	for end < len(s) && isASCIILetter(s[end]) {
+		end++
+	}
+	command := s[nIndex:end]
+	switch command {
+	case "neq", "nu", "noindent", "not", "notin", "nabla", "neg", "newline", "nobreak", "nobreakspace", "normalfont", "normalsize", "nocite", "newcommand", "newenvironment", "newunicodechar", "number", "num":
+		return true
+	default:
+		return false
+	}
 }
 
 func isASCIILetter(c byte) bool {
@@ -577,6 +867,11 @@ type questionTemplateData struct {
 	Score      string
 	Stem       string
 	OptionRows []renderedOptionRow
+}
+
+type clozeQuestionTemplateData struct {
+	Number  int
+	Options []renderedOption
 }
 
 type examSectionTemplateData struct {
@@ -629,6 +924,40 @@ func ChoiceQuestion(number int, stem string, options []string) string {
 	})
 }
 
+// ClozeQuestion renders the compact four-choice row used by English cloze
+// questions. The question number is rendered once; the source stem remains in
+// the shared passage and is therefore intentionally omitted here.
+func ClozeQuestion(number int, options []string) string {
+	const labels = "ABCD"
+	rendered := make([]renderedOption, 0, 4)
+	for i := 0; i < 4; i++ {
+		option := ""
+		if i < len(options) {
+			option = options[i]
+		}
+		label := string(labels[i])
+		rendered = append(rendered, renderedOption{
+			Label: label,
+			Text:  escapeLaTeX(optionLabelPrefix.ReplaceAllString(strings.TrimSpace(option), "")),
+		})
+	}
+	return renderTemplate("cloze_question", clozeQuestionTemplateData{
+		Number: number, Options: rendered,
+	})
+}
+
+// ExamText renders unnumbered shared material such as a grouped reading
+// passage, retaining the normal LaTeX escaping rules.
+func ExamText(text string) string {
+	return escapeLaTeX(text)
+}
+
+// ExamOptions renders an unnumbered shared choice list such as English II
+// Part B's seven matching statements.
+func ExamOptions(options []string) string {
+	return renderTemplate("choice_options", optionRows(options))
+}
+
 func MajorQuestion(number int, score float64, stem string) string {
 	return renderTemplate("major_question", questionTemplateData{
 		Number: number, Score: strconv.FormatFloat(score, 'f', 0, 64), Stem: escapeLaTeX(stem),
@@ -640,47 +969,4 @@ func examPreamble(footer FooterBranding, totalPages int) string {
 	return renderTemplate("document_preamble", footerTemplateData{
 		Left: escapeLaTeX(footer.Left), Right: escapeLaTeX(footer.Right),
 	})
-}
-
-type AnswerEntry struct {
-	Number      int
-	Answer      string
-	RubricItems []string
-}
-
-type answerBlockTemplateData struct {
-	Number      int
-	Answer      string
-	RubricItems []string
-}
-
-func answerView(number int, answer string, rubricItems []string) answerBlockTemplateData {
-	items := make([]string, len(rubricItems))
-	for i, item := range rubricItems {
-		items[i] = escapeLaTeX(item)
-	}
-	return answerBlockTemplateData{Number: number, Answer: escapeLaTeX(answer), RubricItems: items}
-}
-
-func AnswerKey(meta ExamMeta, answers []AnswerEntry, footer FooterBranding) string {
-	headLine := "全国硕士研究生入学统一考试"
-	if meta.Year != "" {
-		headLine = meta.Year + " 年" + headLine
-	}
-	views := make([]answerBlockTemplateData, len(answers))
-	for i, answer := range answers {
-		views[i] = answerView(answer.Number, answer.Answer, answer.RubricItems)
-	}
-	return renderTemplate("answers_document", struct {
-		Footer   footerTemplateData
-		HeadLine string
-		Answers  []answerBlockTemplateData
-	}{
-		Footer:   footerTemplateData{Left: escapeLaTeX(footer.Left), Right: escapeLaTeX(footer.Right)},
-		HeadLine: escapeLaTeX(headLine), Answers: views,
-	})
-}
-
-func AnswerBlock(index int, answer string, rubricItems []string) string {
-	return renderTemplate("answer_block", answerView(index, answer, rubricItems))
 }

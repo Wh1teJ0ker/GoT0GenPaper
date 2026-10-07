@@ -2,6 +2,11 @@
 // These structs mirror the concepts described in the project documentation.
 package models
 
+import (
+	"strconv"
+	"strings"
+)
+
 // KnowledgePoint is a node in the knowledge graph.
 type KnowledgePoint struct {
 	ID       string `json:"id"`
@@ -21,6 +26,78 @@ const (
 	TypeFillBlank   QuestionType = "fill_blank"   // 填空
 	TypeMajor       QuestionType = "major"        // 大题(计算/证明/算法)
 )
+
+// IsEnglishSubject identifies the two English postgraduate-paper profiles.
+func IsEnglishSubject(subject string) bool {
+	subject = strings.ToLower(strings.TrimSpace(subject))
+	return subject == "english1" || subject == "english2" || subject == "英语一" || subject == "英语二"
+}
+
+// EnglishQuestionOrder returns the official section order and the source
+// position encoded in English knowledge-point paths. It keeps composition and
+// rendering aligned even though all objective English items use TypeChoice.
+func EnglishQuestionOrder(points []string) (section, position int) {
+	section = 6
+	if len(points) > 1 {
+		switch strings.TrimSpace(points[1]) {
+		case "完形填空":
+			section = 0
+		case "阅读理解":
+			section = 1
+			if len(points) > 2 && strings.EqualFold(strings.TrimSpace(points[2]), "Part B") {
+				section = 2
+			}
+		case "翻译":
+			section = 3
+		case "写作":
+			section = 5
+			if len(points) > 2 && strings.Contains(strings.TrimSpace(points[2]), "应用文") {
+				section = 4
+			}
+		}
+	}
+	position = 1 << 30
+	if len(points) > 0 {
+		last := strings.TrimSpace(points[len(points)-1])
+		last = strings.TrimPrefix(last, "题位")
+		if n, err := strconv.Atoi(last); err == nil && n > 0 {
+			position = n
+		}
+	}
+	return section, position
+}
+
+// EnglishQuestionPosition returns the official question number encoded in an
+// English question's knowledge-point path.
+func EnglishQuestionPosition(points []string) (int, bool) {
+	if len(points) == 0 {
+		return 0, false
+	}
+	last := strings.TrimSpace(points[len(points)-1])
+	last = strings.TrimPrefix(last, "题位")
+	position, err := strconv.Atoi(last)
+	return position, err == nil && position > 0
+}
+
+// IsEnglish2PartB identifies the matching-task questions whose answer choices
+// are A-G rather than the usual A-D.
+func IsEnglish2PartB(points []string) bool {
+	if len(points) < 3 {
+		return false
+	}
+	subject := strings.ToLower(strings.TrimSpace(points[0]))
+	return (subject == "english2" || subject == "英语二") &&
+		strings.EqualFold(strings.TrimSpace(points[1]), "阅读理解") &&
+		strings.EqualFold(strings.TrimSpace(points[2]), "Part B")
+}
+
+// IsEnglish2PartBMatchType accepts the canonical label and the shorter label
+// used by older saved papers. Both describe the 2026 named-viewpoint task;
+// paragraph-heading labels are intentionally excluded.
+func IsEnglish2PartBMatchType(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "人物观点匹配" || value == "观点匹配"
+}
 
 // CognitiveLevel maps to Bloom's taxonomy.
 type CognitiveLevel string
@@ -100,41 +177,20 @@ func BandFromDifficulty(value float64) DifficultyBand {
 
 // GeneratedQuestion is a question produced by the LLM generator.
 type GeneratedQuestion struct {
-	ID         string       `json:"id"`
-	SpecID     string       `json:"specId"`            // links back to SpecEntry
-	Stem       string       `json:"stem"`              // 题面(LaTeX)
-	Options    []string     `json:"options,omitempty"` // 选择题
-	Answer     string       `json:"answer"`            // 标准答案(LaTeX)
-	Type       QuestionType `json:"type"`
-	Points     []string     `json:"points"`
-	Score      float64      `json:"score"`              // 分值(从spec带入,校验/装配用)
-	Difficulty float64      `json:"difficulty"`         // 实测难度(校验后)
-	Status     string       `json:"status,omitempty"`   // ready / needs_review
-	Warnings   []string     `json:"warnings,omitempty"` // 生成质量或外部依赖告警
-}
-
-// RubricItem is one scoring checkpoint in a rubric.
-type RubricItem struct {
-	ID          string  `json:"id"`
-	Description string  `json:"description"` // e.g. "设变量"
-	MaxScore    float64 `json:"maxScore"`
-}
-
-// Rubric is the versioned scoring standard shared across answer and grading stages.
-type Rubric struct {
-	ID                string       `json:"id"`
-	QuestionID        string       `json:"questionId"`
-	Items             []RubricItem `json:"items"`
-	AcceptableMethods []string     `json:"acceptableMethods"` // 可接受解法族
-	Version           int          `json:"version"`
-}
-
-// GradingResult is the per-checkpoint verdict for a student's answer.
-type GradingResult struct {
-	RubricItemID string  `json:"rubricItemId"`
-	Passed       bool    `json:"passed"`
-	PartialScore float64 `json:"partialScore"`
-	Note         string  `json:"note"` // 误差来源标注
+	ID             string       `json:"id"`
+	SpecID         string       `json:"specId"`            // links back to SpecEntry
+	GroupID        string       `json:"groupId,omitempty"` // shared-material group for English composite tasks
+	SharedMaterial string       `json:"sharedMaterial,omitempty"`
+	SharedOptions  []string     `json:"sharedOptions,omitempty"`
+	Stem           string       `json:"stem"`              // 题面(LaTeX)
+	Options        []string     `json:"options,omitempty"` // 选择题
+	Answer         string       `json:"answer"`            // 标准答案(LaTeX)
+	Type           QuestionType `json:"type"`
+	Points         []string     `json:"points"`
+	Score          float64      `json:"score"`              // 分值(从spec带入,校验/装配用)
+	Difficulty     float64      `json:"difficulty"`         // 实测难度(校验后)
+	Status         string       `json:"status,omitempty"`   // ready / needs_review
+	Warnings       []string     `json:"warnings,omitempty"` // 生成质量或外部依赖告警
 }
 
 // ExamPaper is the final assembled deliverable.
@@ -143,6 +199,5 @@ type ExamPaper struct {
 	Subject    string              `json:"subject"`
 	Questions  []GeneratedQuestion `json:"questions"`
 	SpecTable  SpecTable           `json:"specTable"` // 生成后细目表
-	Rubrics    []Rubric            `json:"rubrics"`
 	TotalScore float64             `json:"totalScore"`
 }

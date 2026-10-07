@@ -1,200 +1,114 @@
 # 使用说明
 
+当前程序只生成考生试卷。参考答案保留在 `paper.json` 供内部质量校验；不输出答案册或答题卡，也不提供扫描和批改命令。
+
 ## 1. 环境准备
 
-- Go 1.25 或更新版本：编译和运行 CLI。
-- 一个兼容 OpenAI Chat Completions API 的 LLM 服务：生成题目、答案和主观题批改需要。
-- `xelatex` 或 `tectonic`：编译试卷、答案和答题卡 PDF。仅运行纯文本组卷时不是必需项。
-- 支持图像输入的多模态 LLM：`grade-scan` 会把当前扫描答题区域直接发送给 `vision_model`；不需要 Tesseract 或其他本地 OCR。
+- Go 1.25 或更新版本，用于构建 CLI。
+- 一个兼容 OpenAI Chat Completions API 的 LLM 服务，用于生成题目。
+- `tectonic` 或 `xelatex`，仅在需要 PDF 时安装。
 
-macOS 可用 Homebrew 安装依赖，例如：
+macOS 可运行 `brew install go tectonic`。尚未安装 TeX 引擎时，仍可生成 `paper.json` 与 `exam.tex`。
 
-```bash
-brew install go tectonic
-```
-
-Linux/Windows 请按相应发行版安装 Go 与 TeX 引擎。项目本身不要求 Node.js、Wails 或数据库。
-
-### LaTeX 引擎是否可以内嵌
-
-当前默认通过 PATH 使用 `tectonic` 或 `xelatex`。可以把 Tectonic 可执行文件随各平台发布包一起分发，或用 `go:embed` 打包后启动时释放到缓存目录；但这仍需要同时处理 TeX 包、中文字体、平台二进制、代码签名和许可证，不能只嵌入一个 Go 文件就实现完全离线编译。MacTeX/TeX Live 更不适合直接内嵌，体积和依赖都较大。
-
-因此当前版本优先保持外部 `tectonic` 的稳定路径，后续若需要一键分发，再评估“按平台附带 Tectonic + 固定包缓存”的发布方案。该方案不会改变组卷和 LaTeX 模板接口。
-
-## 2. 安装与自检
+## 2. 配置与自检
 
 ```bash
 cp config.example.toml config.toml
 chmod 600 config.toml
-# 编辑 config.toml 中的 base_url、模型名和 API Key
+# 编辑 base_url、default_model 和 api_key
 make build
 ./bin/got0genpaper version
 ./bin/got0genpaper test
 ```
 
-`test` 检查 Go、TOML、active provider 参数、模板、六个科目的真题目录、输出目录写权限和 PDF 引擎。扫描批改不依赖本地 OCR；联网多模态能力使用 `test-provider --vision` 检测。
-
-测试供应商连接会实际发出一次轻量请求：
+`test` 只检查本地依赖、配置、科目题库、模板和输出目录权限；不会调用模型或生成试卷。要测试真实供应商连接，显式运行：
 
 ```bash
 ./bin/got0genpaper test-provider
 ./bin/got0genpaper test-provider --provider glm-local
-./bin/got0genpaper test-provider --provider glm-local --vision
-```
-
-`--vision` 会发送一张内存中生成的 PNG，确认当前模型接受图像输入。也可以在本地自检中同时检查文本和多模态连接：
-
-```bash
 ./bin/got0genpaper test --network
 ```
 
-## 3. 选择与测试供应商
+这些命令会发出轻量模型请求并可能产生少量费用。多供应商管理见[配置说明](CONFIGURATION.md)。
 
-查看已配置供应商并切换 active provider：
+## 3. 生成试卷
 
-```bash
-./bin/got0genpaper config list
-./bin/got0genpaper config use glm-local
-./bin/got0genpaper config show
-```
-
-添加另一个兼容供应商：
+支持 `408`、`数学一`、`数学二`、`英语一`、`英语二` 和 `政治`。默认从配置 `data_dir` 下对应的真题目录读取语料。
 
 ```bash
-./bin/got0genpaper config add \
-  --id deepseek \
-  --name DeepSeek \
-  --base-url https://api.deepseek.com \
-  --model deepseek-chat
-```
-
-`config add` 不要求命令行传密钥。随后在权限为 `0600` 的 `config.toml` 中设置该 provider 的 `api_key`，或切换到该 provider 后通过 `NEWAPI_API_KEY` 环境变量提供密钥。不要把密钥提交到仓库或放进 shell 历史。
-
-## 4. 生成试卷
-
-支持 `408`、`数学一`、`数学二`、`英语一`、`英语二`、`政治`。不传 `--source` 时，默认读取配置 `data_dir` 下对应的内置历年真题目录。
-
-```bash
-# 默认 408；默认进行最多一轮整卷修复
+# 生成 408，输出 paper.json 与 exam.tex
 ./bin/got0genpaper generate --subject 408
 
-# 生成数学二并编译 PDF
+# 生成数学二并编译 exam.pdf
 ./bin/got0genpaper generate --subject "数学二" --compile
 
-# 使用难度预设：easy、medium、hard
-./bin/got0genpaper generate --subject "数学二" --difficulty hard --compile
-
-# 自定义易、中、难比例（比例之和必须为 1）
-./bin/got0genpaper generate --subject "数学二" --difficulty-hist 0.2,0.6,0.2
-
-# 精确指定数学二 22 题的难度题数：易 2、中 10、难 10
-./bin/got0genpaper generate --subject "数学二" --difficulty-counts 2,10,10
-
-# 明确禁止自动修复，只生成并校验首轮结果
-./bin/got0genpaper generate --subject "数学二" --max-repair-rounds 0
-
-# 最多请求两轮整卷修复
-./bin/got0genpaper generate --subject "数学二" --max-repair-rounds 2
-
-# 指定另一份真题目录或单个输入文件
+# 指定来源文件或目录
 ./bin/got0genpaper generate --subject 408 --source /path/to/exams
 ```
 
-完整生成会对多道题分别调用模型，可能耗时较长并产生费用。请先用 `test-provider` 确认 endpoint、key 和模型权限，再开始生成。
+每次完整生成会多次请求模型。正式生成前先执行 `test-provider` 确认连接、密钥和模型权限。
 
-### 难度控制
+## 4. 控制难度
 
-`--difficulty` 控制生成前的难度分布预设：
+```bash
+# 使用难度预设
+./bin/got0genpaper generate --subject "数学二" --difficulty hard
 
-- `default`：使用科目默认分布；数学二当前为易 10%、中 45%、难 45%。这是软目标，组卷会尽量接近。
-- `easy`：易 50%、中 40%、难 10%。
-- `medium`：易 20%、中 60%、难 20%。
-- `hard`：易 10%、中 45%、难 45%。
+# 指定易、中、难比例，三项之和为 1
+./bin/got0genpaper generate --subject "数学二" --difficulty-hist 0.2,0.6,0.2
 
-除 `default` 外的预设都是严格目标：组卷和校验都会按最大余数法得到的整数题数执行。
+# 数学二共 22 题，精确指定难度题数
+./bin/got0genpaper generate --subject "数学二" --difficulty-counts 2,10,10
+```
 
-需要按比例控制时使用 `--difficulty-hist easy,medium,hard`，例如
-`--difficulty-hist 0.2,0.6,0.2`。也支持命名形式
-`easy=0.2,medium=0.6,hard=0.2`。比例之和必须为 1；程序会用最大余数法把比例转换为整数题数。
+`--difficulty` 可选 `default`、`easy`、`medium`、`hard`。自定义比例按最大余数法换算为整数题数；也可用 `easy=2,medium=10,hard=10` 的命名格式。比例和题数不能同时指定，也不能与非默认难度预设同时指定。除 `default` 外的预设会作为严格题数目标。
 
-需要精确指定题数时使用 `--difficulty-counts`，例如数学二的
-`--difficulty-counts 2,10,10`，也支持
-`easy=2,medium=10,hard=10`。题数之和必须等于该科目的固定题数；数学二为 22。
-`--difficulty-hist` 与 `--difficulty-counts` 不能同时使用，二者也不能与非默认
-`--difficulty` 同时使用。
+默认最多进行一轮整卷修复。使用 `--max-repair-rounds 0` 只生成并校验首轮结果；也可以指定更大的非负轮数。修复会再次调用模型并产生费用。
 
-最终目标题数、实际题数、比例和严格标记会写入 `data/blueprint.json`、`data/spec_table.json`、`output/spec_table.md` 和生成命令的 JSON 输出中。严格目标下，校验结果中的 `difficultyCountsTarget` 与 `difficultyCountsActual` 必须一致，`difficultyOK` 才会通过；默认软目标只按比例偏差和 KL 阈值判断。
+## 5. 校验与修复
 
-## 5. 编译和查看产物
+生成过程会检查题型结构、考纲范围、题目完整性、参考答案、分值、难度和题目重复。单独检查已有试卷不会重新生成：
+
+```bash
+./bin/got0genpaper validate
+./bin/got0genpaper validate --paper output/archive/run/paper.json --data output/archive/run/data
+```
+
+只重装配现有 `paper.json`，不调用模型：
+
+```bash
+./bin/got0genpaper reassemble --paper output/archive/run/paper.json --compile
+```
+
+根据校验报告修复全部问题题位，或显式指定题位：
+
+```bash
+./bin/got0genpaper repair
+./bin/got0genpaper repair --specs spec_031,spec_037 --compile
+```
+
+指定归档 `paper.json` 时可附上其对应的 `--data` 缓存目录，避免覆盖当前 `output/`。修复会重新生成指定题位，其余题目保持不变。
+
+## 6. 查看与编译
 
 ```bash
 ./bin/got0genpaper artifacts
 ./bin/got0genpaper compile
 ```
 
-默认产物写到 `output/`：
+默认输出目录由 `paths.output_dir` 决定：
 
-- `paper.json`：题目、答案、题型和评分标准。
-- `exam.tex`、`answers.tex`、`answer_sheet.tex`：可编辑 LaTeX 源文件。
-- `exam.pdf`、`answers.pdf`、`answer_sheet.pdf`：对应 PDF。
-- `spec_table.md`：题型、知识点、分值和难度规划。
+- `paper.json`：结构化题目、内部参考答案、分值及校验元数据。
+- `exam.tex`：可编辑的考生试卷。
+- `exam.pdf`：编译后的考生试卷。
+- `exam.log`：编译日志。
 
-如 PDF 编译失败，先检查 `./bin/got0genpaper test` 中 PDF 引擎状态，再查看 `output/*.log`。只有通过就绪检查的试卷才允许用 `compile` 编译。
+`compile` 只编译 `exam.tex`。旧版输出目录中可能留有历史答案册或答题卡文件；新生成流程不会创建或清理这些文件。
 
-## 6. 文本答案批改
+## 7. 常见问题
 
-答案输入是 JSON 数组，`questionId` 必须对应 `paper.json` 中的题目 ID。客观题使用 `studentOptions`（选项字母数组）或 `studentAnswer`；主观题填写完整作答文本。
+连接失败时检查 active provider 的 `base_url`、模型名、API Key 和模型权限，然后单独运行 `test-provider`。使用其他 TOML 配置时设置 `GOT0GENPAPER_CONFIG=/path/to/config.toml`。
 
-```json
-[
-  {"questionId":"gen_spec_001","studentOptions":["B"]},
-  {"questionId":"gen_spec_017","studentAnswer":"写在这里的解题过程"}
-]
-```
+PDF 编译失败时运行 `got0genpaper test` 确认 PDF 引擎状态，并检查 `output/exam.log`。如果只需要 LaTeX 源文件，不要求本地安装 TeX 引擎。
 
-运行批改：
-
-```bash
-./bin/got0genpaper grade \
-  --paper output/paper.json \
-  --answers answers.json \
-  --output output/grades.json
-```
-
-缺交题会记为 `blank`；重复题号、未知题号、识别不确定和无法判定的主观答案会进入 `needs_review`。主观题在 LLM 不可用时不会自动给满分。输出含逐题评分、总分、满分和复核列表。
-
-## 7. 扫描答题卡批改
-
-扫描输入属于后续实验范围，不参与当前试卷生成主链的稳定性判断。当前生成链只要求输出 `paper.json`、LaTeX 源文件和 PDF；PDF/PNG 扫描格式适配会在输入协议确定后单独演进。
-
-使用本工具生成的答题卡，扫描时保留页面四角的机读定位块。图片支持 PNG/JPEG；传入整套答题卡对应页：
-
-```bash
-./bin/got0genpaper scan \
-  --paper output/paper.json \
-  --images scans/page-01.jpg scans/page-02.jpg \
-  --segments-dir output/segments \
-  --output output/scan.json
-
-./bin/got0genpaper grade-scan \
-  --paper output/paper.json \
-  --images scans/page-01.jpg scans/page-02.jpg \
-  --segments-dir output/segments \
-  --output output/grades-scan.json
-```
-
-也可以重复使用 `--images`：`--images page-01.jpg --images page-02.jpg`。程序会从每张扫描图检测定位标记并估计变换，再根据扫描页面的结构分割答题区域，不要求与原 PDF 像素坐标完全一致。`grade-scan` 将每个分割图片和题目/评分标准发送给配置中的 `vision_model`，客观题和主观题都走多模态模型；模型响应会再次校验。定位失败、涂写模糊、模型不可用或输出格式异常都会标记 `needs_review`，不能跳过人工复核。
-
-状态含义：`recognized` 为达到阈值的识别，`blank` 为确定空白，`ambiguous` 为多涂/不确定，`needs_review` 为不能安全自动处理。`--allow-uncalibrated` 仅供诊断，不能用于正式自动评分。
-
-## 8. 路径与配置
-
-```bash
-# 使用另一个 TOML 文件
-GOT0GENPAPER_CONFIG=/secure/path/paper.toml ./bin/got0genpaper test
-
-# 临时覆盖当前 active provider 的 key
-NEWAPI_API_KEY="$PAPER_LLM_KEY" ./bin/got0genpaper test-provider
-```
-
-支持覆盖模型、Base URL 和分题型模型的完整变量清单见[配置说明](CONFIGURATION.md)。相对 `data_dir`、`output_dir` 和 `templates` 路径以 TOML 文件所在目录为基准。
+生成内容属于模型生成的模拟材料，不是官方试题或标准答案。请自行核对题目范围和答案；历年真题、考纲及生成内容的使用还应遵守来源和模型服务条款。

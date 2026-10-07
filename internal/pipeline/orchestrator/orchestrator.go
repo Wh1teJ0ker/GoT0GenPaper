@@ -107,7 +107,13 @@ func (o *Orchestrator) Compose(ctx context.Context, bp *Blueprint, candidates []
 	for t := range bp.TypeQuota {
 		types = append(types, t)
 	}
-	sort.Slice(types, func(i, j int) bool { return types[i] < types[j] })
+	sort.Slice(types, func(i, j int) bool {
+		left, right := questionTypeOrder(types[i]), questionTypeOrder(types[j])
+		if left != right {
+			return left < right
+		}
+		return types[i] < types[j]
+	})
 
 	compositionPool := pool
 	if bp.DifficultyCountStrict && len(bp.DiffCountQuota) > 0 {
@@ -183,6 +189,16 @@ func (o *Orchestrator) Compose(ctx context.Context, bp *Blueprint, candidates []
 		typeIndex[t] = i
 	}
 	sort.SliceStable(selection, func(i, j int) bool {
+		if models.IsEnglishSubject(bp.Subject) {
+			si, pi := models.EnglishQuestionOrder(selection[i].Points)
+			sj, pj := models.EnglishQuestionOrder(selection[j].Points)
+			if si != sj {
+				return si < sj
+			}
+			if pi != pj {
+				return pi < pj
+			}
+		}
 		ti, tj := typeIndex[selection[i].Type], typeIndex[selection[j].Type]
 		if ti != tj {
 			return ti < tj
@@ -202,11 +218,15 @@ func (o *Orchestrator) Compose(ctx context.Context, bp *Blueprint, candidates []
 
 	entries := make([]models.SpecEntry, 0, len(selection))
 	for i, c := range selection {
+		points := append([]string(nil), c.Points...)
+		if strings.EqualFold(strings.TrimSpace(bp.Subject), "english2") || strings.TrimSpace(bp.Subject) == "英语二" {
+			points = normalizeEnglish2Points(points, i+1)
+		}
 		entries = append(entries, models.SpecEntry{
 			ID:          fmt.Sprintf("spec_%03d", i+1),
 			Index:       i + 1,
 			Type:        c.Type,
-			Points:      c.Points,
+			Points:      points,
 			Cognitive:   c.Cognitive,
 			DiffBand:    c.DiffBand,
 			Score:       c.Score,
@@ -221,6 +241,43 @@ func (o *Orchestrator) Compose(ctx context.Context, bp *Blueprint, candidates []
 		DifficultyTarget:       DifficultyTargetCounts(bp, len(entries)),
 		DifficultyTargetStrict: bp.DifficultyCountStrict,
 	}, nil
+}
+
+func normalizeEnglish2Points(points []string, position int) []string {
+	if len(points) < 2 || position < 1 || position > 48 {
+		return points
+	}
+	positionTag := fmt.Sprintf("题位%d", position)
+	switch {
+	case position <= 20:
+		return []string{"english2", "完形填空", "语篇词汇与语境", positionTag}
+	case position <= 40:
+		textNumber := (position-21)/5 + 1
+		return []string{"english2", "阅读理解", "Part A", fmt.Sprintf("Text %d", textNumber), positionTag}
+	case position <= 45:
+		return []string{"english2", "阅读理解", "Part B", "人物观点匹配", positionTag}
+	case position == 46:
+		return []string{"english2", "翻译", "英译汉", positionTag}
+	case position == 47:
+		return []string{"english2", "写作", "应用文", positionTag}
+	default:
+		return []string{"english2", "写作", "图表作文", positionTag}
+	}
+}
+
+func questionTypeOrder(questionType models.QuestionType) int {
+	switch questionType {
+	case models.TypeChoice:
+		return 0
+	case models.TypeMultiChoice:
+		return 1
+	case models.TypeFillBlank:
+		return 2
+	case models.TypeMajor:
+		return 3
+	default:
+		return 4
+	}
 }
 
 func selectDisciplineQuotas(pool []candidateSpec, bp *Blueprint, types []models.QuestionType) ([]candidateSpec, error) {
@@ -377,7 +434,7 @@ func augmentCellCandidates(cands, catalogue []candidateSpec, t models.QuestionTy
 	for _, c := range out {
 		used[candidateKey(c)] = true
 	}
-	pointSets := appendUniquePointSets(pointSetCatalogue(catalogue, discipline), fallbackPointSets(discipline))
+	pointSets := appendUniquePointSets(pointSetCatalogue(catalogue, discipline), fallbackPointSetsFor(bp.Subject, discipline))
 	scores := make([]float64, 0)
 	seenScores := make(map[float64]bool)
 	for _, candidate := range cands {
@@ -404,7 +461,7 @@ func augmentCellCandidates(cands, catalogue []candidateSpec, t models.QuestionTy
 			// resort after the catalogue is exhausted.
 			points := nextPointSet(pointSets, used, t, len(out)+scoreIndex+int(band))
 			if len(points) == 0 {
-				points = nextSyntheticPointSet(discipline, t, used, len(out)+scoreIndex+int(band))
+				points = nextSyntheticPointSet(bp.Subject, discipline, t, used, len(out)+scoreIndex+int(band))
 			}
 			if len(points) == 0 {
 				continue
@@ -592,7 +649,7 @@ func ensureFixedCountCandidatesForDiscipline(cands []candidateSpec, t models.Que
 		usedKeys[candidateKey(c)] = true
 	}
 	pointSets := pointSetCatalogue(catalogue, discipline)
-	pointSets = appendUniquePointSets(pointSets, fallbackPointSets(discipline))
+	pointSets = appendUniquePointSets(pointSets, fallbackPointSetsFor(bp.Subject, discipline))
 	bands := []models.DifficultyBand{models.BandEasy, models.BandMedium, models.BandHard}
 	for i, score := range pattern {
 		var points []string
@@ -630,7 +687,7 @@ func ensureFixedCountCandidatesForDiscipline(cands []candidateSpec, t models.Que
 // impossible for purely arithmetic reasons.
 func augmentDifficultyCandidates(cands []candidateSpec, t models.QuestionType, scores []float64, bp *Blueprint, discipline string, catalogue []candidateSpec) []candidateSpec {
 	pointSets := pointSetCatalogue(catalogue, discipline)
-	pointSets = appendUniquePointSets(pointSets, fallbackPointSets(discipline))
+	pointSets = appendUniquePointSets(pointSets, fallbackPointSetsFor(bp.Subject, discipline))
 	usedKeys := make(map[string]bool, len(cands))
 	for _, c := range cands {
 		usedKeys[candidateKey(c)] = true
@@ -647,7 +704,7 @@ func augmentDifficultyCandidates(cands []candidateSpec, t models.QuestionType, s
 			for count := countCandidates(out, t, score, band); count < needed; count++ {
 				points := nextPointSet(pointSets, usedKeys, t, len(out)+int(band)+count)
 				if len(points) == 0 {
-					points = nextSyntheticPointSet(discipline, t, usedKeys, len(out)+int(band)+count)
+					points = nextSyntheticPointSet(bp.Subject, discipline, t, usedKeys, len(out)+int(band)+count)
 				}
 				if len(points) == 0 {
 					break
@@ -663,8 +720,8 @@ func augmentDifficultyCandidates(cands []candidateSpec, t models.QuestionType, s
 	return out
 }
 
-func nextSyntheticPointSet(discipline string, t models.QuestionType, usedKeys map[string]bool, seed int) []string {
-	bases := fallbackPointSets(discipline)
+func nextSyntheticPointSet(subject, discipline string, t models.QuestionType, usedKeys map[string]bool, seed int) []string {
+	bases := fallbackPointSetsFor(subject, discipline)
 	for i := 0; i < 100; i++ {
 		var points []string
 		suffix := fmt.Sprintf("难度目标候选_%s_%d", t, seed+i)
@@ -686,6 +743,44 @@ func nextSyntheticPointSet(discipline string, t models.QuestionType, usedKeys ma
 		}
 	}
 	return nil
+}
+
+func fallbackPointSetsFor(subject, discipline string) [][]string {
+	if strings.EqualFold(strings.TrimSpace(subject), "政治") || strings.EqualFold(strings.TrimSpace(subject), "politics") {
+		return politicsFallbackPointSets()
+	}
+	return fallbackPointSets(discipline)
+}
+
+func politicsFallbackPointSets() [][]string {
+	return [][]string{
+		{"马克思主义基本原理", "唯物辩证法与矛盾分析"},
+		{"马克思主义基本原理", "马克思主义认识论"},
+		{"马克思主义基本原理", "唯物史观与人民群众"},
+		{"马克思主义基本原理", "马克思主义政治经济学"},
+		{"马克思主义基本原理", "科学社会主义"},
+		{"马克思主义基本原理", "马克思主义哲学基本问题"},
+		{"毛泽东思想和中国特色社会主义理论体系概论", "新民主主义革命理论"},
+		{"毛泽东思想和中国特色社会主义理论体系概论", "毛泽东思想活的灵魂"},
+		{"毛泽东思想和中国特色社会主义理论体系概论", "社会主义改造与建设探索"},
+		{"毛泽东思想和中国特色社会主义理论体系概论", "邓小平理论与改革开放"},
+		{"毛泽东思想和中国特色社会主义理论体系概论", "中国特色社会主义理论体系"},
+		{"习近平新时代中国特色社会主义思想概论", "习近平新时代中国特色社会主义思想"},
+		{"习近平新时代中国特色社会主义思想概论", "中国式现代化"},
+		{"习近平新时代中国特色社会主义思想概论", "新发展理念与高质量发展"},
+		{"习近平新时代中国特色社会主义思想概论", "共同富裕与民生发展"},
+		{"习近平新时代中国特色社会主义思想概论", "文化自信与文明发展"},
+		{"习近平新时代中国特色社会主义思想概论", "党的全面领导与全过程人民民主"},
+		{"中国近现代史纲要", "近代中国社会与革命"},
+		{"中国近现代史纲要", "新民主主义革命史"},
+		{"中国近现代史纲要", "社会主义革命建设与改革开放史"},
+		{"思想道德与法治", "理想信念与中国精神"},
+		{"思想道德与法治", "社会主义核心价值观"},
+		{"思想道德与法治", "法治思维与法律基础"},
+		{"形势与政策以及当代世界经济与政治", "国际关系与全球治理"},
+		{"形势与政策以及当代世界经济与政治", "区域合作与国际组织"},
+		{"形势与政策以及当代世界经济与政治", "年度形势与政策"},
+	}
 }
 
 func countCandidates(cands []candidateSpec, t models.QuestionType, score float64, band models.DifficultyBand) int {

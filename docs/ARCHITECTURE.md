@@ -1,31 +1,26 @@
 # 系统结构
 
-GoT0GenPaper 是单机命令行程序。`cmd/got0genpaper` 解析命令并创建应用服务；业务代码位于 `internal/`，题库与本地生成状态按配置写入磁盘。程序不依赖浏览器、前端、Wails、数据库或常驻服务。
+GoT0GenPaper 是单机命令行程序。主流程只负责生成可打印试卷：
 
-## 组卷流水线
+1. 按科目加载真题语料与考纲约束。
+2. 汇总知识点、题型和难度分布，生成组卷蓝图。
+3. 调用配置的 LLM 生成题目及内部参考答案。
+4. 校验范围、题型结构、答案、分值、难度和重复度，并按需修复题位。
+5. 输出 `paper.json` 与试卷 `exam.tex`；需要时编译 `exam.pdf`。
 
-1. 解析指定科目的历年真题，提取题面、答案、标签和生成示例。
-2. 根据题库统计知识点分布与共现权重。
-3. 按科目蓝图安排题型、分值、知识点和难度；难度比例先通过最大余数法转换为整数题数，也可直接指定题数。
-4. 调用当前供应商生成各题题面。
-5. 生成答案和评分检查点。
-6. 校验覆盖、重复、分值、难度题数和题目完整性；按参数有限修复。
-7. 装配 `paper.json`、试卷/答案/答题卡 LaTeX 和细目表。
-8. 可选地编译 PDF。
-
-组卷调用会产生 LLM 请求和供应商费用。校验不通过或题目需要复核时，产物是草稿；正式 PDF 编译器会拒绝未就绪试卷。
-
-当前稳定性边界是“真题数据 → 组卷蓝图 → LLM 生成 → 答案/评分标准 → 整卷校验 → LaTeX/PDF”。PDF、PNG 等扫描输入不参与组卷主链，后续会在输入协议确定后单独实现。
+参考答案仅留在结构化数据中供质量检查，不生成答案册。答题卡、扫描、识别和批改功能不属于当前项目。
 
 ## 模块边界
 
-- `internal/config`：TOML、路径解析、多个 OpenAI 兼容供应商及环境变量覆盖。
-- `internal/llm`：HTTP 请求和结构化响应处理。
-- `internal/pipeline`：真题解析、统计、编排、生成、答案、校验、组装和批改。
-- `internal/latex`：模板加载、文本规范化、诊断和 PDF 编译。
-- `internal/storage`：本地 JSON/文本读写。
-- `cmd/tools`、`scripts`：人工审计、数据维护和示例，不属于日常 CLI 必需依赖。
+- `cmd/got0genpaper`：CLI 解析、配置管理和生成流程编排。
+- `internal/config`：TOML、多供应商、路径及环境变量。
+- `internal/llm`：OpenAI 兼容 API 客户端。
+- `internal/pipeline/parser`：真题解析与标注。
+- `internal/pipeline/gnn`、`orchestrator`：知识点统计和题位规划。
+- `internal/pipeline/generator`：题面与内部参考答案生成。
+- `internal/pipeline/quality`、`validator`：单题和整卷校验。
+- `internal/pipeline/assembler`、`internal/latex`：试卷 LaTeX 装配、诊断和 PDF 编译。
+- `internal/storage`：本地 JSON 与文本文件读写。
+- `cmd/tools`、`scripts`：数据检查和维护工具，不属于日常生成主链。
 
-## 批改边界
-
-选择/填空等客观答案在文本批改模式下可本地确定性匹配。扫描答题卡先校准页面并按当前扫描图分割区域，再将每个答题区域和评分标准交给 `vision_model`；客观题和主观题统一走多模态路径。识别不确定、定位失败或模型不可用均保留为 `needs_review`，不得自动当作零分或满分。
+`paper.json`、解析缓存和组卷蓝图用于后续复核及修复；面向打印的交付物只有试卷。PDF/PNG 扫描输入暂不处理。

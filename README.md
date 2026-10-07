@@ -4,9 +4,8 @@
 [![CLI](https://img.shields.io/badge/interface-CLI-2F80ED?style=flat&logo=gnubash&logoColor=white)](#先跑起来)
 [![TOML](https://img.shields.io/badge/config-TOML-9C4121?style=flat)](https://toml.io/)
 [![LaTeX](https://img.shields.io/badge/output-LaTeX-008080?style=flat)](https://www.latex-project.org/)
-[![Vision LLM](<https://img.shields.io/badge/grading-Vision%20LLM-7C3AED?style=flat>)](#扫描答题卡批改)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f?style=flat)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.1-3b82f6?style=flat)](VERSION)
+[![Version](https://img.shields.io/badge/version-0.1.2-3b82f6?style=flat)](VERSION)
 
 基于预测知识点，调用大模型生成一套可以打印的考研模拟试卷。
 
@@ -21,9 +20,9 @@ GoT0GenPaper 是一个纯命令行工具，当前已配置以下科目入口：
 - 英语二
 - 政治
 
-它可以完成组卷、答案生成、评分标准生成、答题卡生成和 PDF 编译。当前只有数学二完成过一轮完整的生成、校验和 PDF 流程测试；其他科目虽然已经保留入口和数据结构，但还不能视为同等稳定。
+程序会完成知识点规划、试题生成、内部质量校验，并输出考生试卷 LaTeX/PDF。当前仅数学二完成过一轮完整的生成、校验和 PDF 流程测试；其他科目虽有组卷入口，生成质量仍需逐科验证。参考答案保存在内部 `paper.json` 中用于质量检查，不生成答案册或答题卡。
 
-> **批改功能提示：** 扫描答题卡、视觉模型识别和自动批改功能尚在研究中，当前不作为稳定能力承诺，敬请期待。
+当前版本专注试卷生成，不包含作答识别或批改功能。
 
 > **Tips:** 这是帮我可怜的考研朋友们做的一个小玩具。它适合用来练习和获得额外题目，不是官方真题，也不承诺押中考试；请把模型生成内容当作模拟材料，并自行核对答案和知识点。
 
@@ -71,8 +70,6 @@ name = "Local GLM 5.2"
 base_url = "http://127.0.0.1:3001"
 api_key = ""
 default_model = "glm-5.2"
-judge_model = "glm-5.2"
-vision_model = "glm-5.2"
 enabled = true
 ```
 
@@ -92,11 +89,10 @@ make build
 
 ```bash
 ./bin/got0genpaper test-provider
-./bin/got0genpaper test-provider --vision
 ./bin/got0genpaper test --network
 ```
 
-其中 `--vision` 会发送一张最小 PNG 图片，确认当前模型是否真正支持图像输入。测试会产生请求，可能消耗少量额度。
+连接测试会实际发送轻量请求，可能产生少量费用。
 
 ### 4. 生成一套试卷
 
@@ -115,7 +111,7 @@ make build
 ./bin/got0genpaper generate --subject "数学二" --difficulty-counts 2,10,10
 ```
 
-这条命令会完成题目生成、答案生成、评分标准生成、质量校验，并在最后尝试编译 PDF。
+这条命令会规划题型与知识点、调用模型生成试题、执行结构和内容校验，并在最后尝试编译 PDF。校验发现问题时，可按题位修复后再重新装配；详见[使用指南](docs/USAGE.md)。
 
 支持的科目名称如下：
 
@@ -165,17 +161,12 @@ make build
 
 默认结果写入 `output/`：
 
-| 文件                 | 用途                                   |
-| -------------------- | -------------------------------------- |
-| `paper.json`       | 结构化试卷、题目、答案、分值和评分标准 |
-| `exam.tex`         | 考生试卷 LaTeX 源文件                  |
-| `answers.tex`      | 参考答案和评分标准 LaTeX 源文件        |
-| `answer_sheet.tex` | 答题卡 LaTeX 源文件                    |
-| `exam.pdf`         | 考生试卷 PDF                           |
-| `answers.pdf`      | 参考答案 PDF                           |
-| `answer_sheet.pdf` | 答题卡 PDF                             |
-| `spec_table.md`    | 题型、知识点、分值和难度规划           |
-| `*.log`            | LaTeX 编译日志                         |
+| 文件 | 用途 |
+| --- | --- |
+| `paper.json` | 结构化试卷与内部质量校验数据，含参考答案 |
+| `exam.tex` | 考生试卷 LaTeX 源文件 |
+| `exam.pdf` | 考生试卷 PDF |
+| `exam.log` | LaTeX 编译日志 |
 
 查看当前产物：
 
@@ -235,54 +226,6 @@ fill_blank = "balanced-model"
 major = "strong-model"
 ```
 
-`judge_model` 用于答案核验和文本批改，`vision_model` 用于扫描图批改，`default_model` 是通用回退模型。
-
-## 文本答案批改（研究中）
-
-> 当前批改链路仍在研究和验证，以下命令仅供开发测试，不建议用于正式判分。稳定的核心能力目前是预测知识点驱动的试卷生成。
-
-准备一个 JSON 数组，`questionId` 必须对应 `output/paper.json` 中的题目 ID：
-
-```json
-[
-  {"questionId":"gen_spec_001","studentOptions":["B"]},
-  {"questionId":"gen_spec_017","studentAnswer":"写在这里的解题过程"}
-]
-```
-
-执行批改：
-
-```bash
-./bin/got0genpaper grade \
-  --paper output/paper.json \
-  --answers answers.json \
-  --output output/grades.json
-```
-
-批改结果会包含逐题得分、总分、满分和复核列表。缺交题会标记为 `blank`；不确定、重复或无法安全判断的答案会进入 `needs_review`，不会被强行判定。
-
-## 扫描答题卡批改（研究中）
-
-扫描批改使用视觉模型。程序会先处理扫描页面和答题区域，再把分割后的图像交给 `vision_model`。该流程尚未达到稳定可用状态，敬请期待后续完善。
-
-当前命令入口如下：
-
-```bash
-./bin/got0genpaper scan \
-  --paper output/paper.json \
-  --images scans/page-01.jpg scans/page-02.jpg \
-  --segments-dir output/segments \
-  --output output/scan.json
-
-./bin/got0genpaper grade-scan \
-  --paper output/paper.json \
-  --images scans/page-01.jpg scans/page-02.jpg \
-  --segments-dir output/segments \
-  --output output/grades-scan.json
-```
-
-这部分目前仍属于实验能力。定位失败、图片模糊、模型响应异常或识别不确定时，结果会标记为 `needs_review`，正式使用时必须保留人工复核。
-
 ## 常用命令速查
 
 ```bash
@@ -297,7 +240,7 @@ make vet                                # 静态检查
 make check                              # 格式、依赖、测试、vet、构建
 make selftest                           # 检查本地运行环境
 make generate SUBJECT="数学二"           # 生成试卷
-make pdf                                # 编译 output/*.tex
+make pdf                                # 编译 output/exam.tex
 
 ./bin/got0genpaper help                 # 查看命令帮助
 ./bin/got0genpaper health                # 查看当前运行状态
@@ -326,7 +269,7 @@ ls -l config.toml
 检查 `base_url` 是否是 OpenAI 兼容接口根地址、模型名称是否正确、API Key 是否有权限，并单独执行：
 
 ```bash
-./bin/got0genpaper test-provider --vision
+./bin/got0genpaper test-provider
 ```
 
 ### PDF 编译失败
@@ -341,8 +284,6 @@ ls -l config.toml
 
 ```text
 output/exam.log
-output/answers.log
-output/answer_sheet.log
 ```
 
 当前版本默认依赖外部 `tectonic` 或 `xelatex`，尚未把完整 LaTeX 环境内嵌到 Go 二进制中。
@@ -358,7 +299,7 @@ data/syllabus/          考纲摘要及来源清单
 templates/              LaTeX 模板
 docs/                   使用、配置、数据、架构、开发和 CI/CD 文档
 scripts/                数据抓取及辅助脚本
-output/                 本地试卷、答案、答题卡和 PDF
+output/                 本地试卷与 PDF
 bin/                    本地构建产物
 ```
 
@@ -368,13 +309,13 @@ bin/                    本地构建产物
 
 项目源代码采用 [MIT License](LICENSE)，适合这个以命令行工具和工程代码为主的项目：条款简洁，允许个人使用、修改、分发和二次开发。
 
-需要特别区分的是：`data/exams/`、`data/syllabus/` 以及其中引用或整理的历年试题、考纲和其他第三方资料，不会因为代码采用 MIT License 就自动获得 MIT 授权。使用、再分发这些资料时，应遵守各自来源的版权和使用条款；生成的试卷、答案和 PDF 也可能受到输入资料及模型服务条款的约束。
+需要特别区分的是：`data/exams/`、`data/syllabus/` 以及其中引用或整理的历年试题、考纲和其他第三方资料，不会因为代码采用 MIT License 就自动获得 MIT 授权。使用、再分发这些资料时，应遵守各自来源的版权和使用条款；生成的试卷与 PDF 也可能受到输入资料及模型服务条款的约束。
 
 相关资料和生成内容仅供学习、研究和个人备考使用，请勿用于商业销售、付费分发、冒充官方资料，或进行未经授权的公开传播。使用者应自行确认资料来源、模型服务和目标平台的具体条款，并承担相应责任。
 
 ## 版本和发布
 
-当前源码版本为 `0.1.1`，项目版本由根目录 `VERSION` 文件管理。本地构建时通过 `Makefile` 注入 CLI：
+当前源码版本为 `0.1.2`，项目版本由根目录 `VERSION` 文件管理。本地构建时通过 `Makefile` 注入 CLI：
 
 ```bash
 make version
@@ -382,14 +323,14 @@ make version
 
 正式发布使用 `vX.Y.Z` Git 标签。推送标签后，GitHub Actions 会自动测试代码，构建 Linux、macOS 和 Windows 版本，打包并创建 GitHub Release，同时附带 SHA-256 校验文件。
 
-`v0.1.1` 增加难度预设、比例和精确题数配置，并将难度目标贯通到组卷、校验及细目表。默认科目分布保持软目标，用户显式配置后按严格目标执行。
+`v0.1.2` 聚焦稳定试卷生成：收敛到考生试卷输出，移除尚未稳定的批改与扫描入口；加强科目题型、内容边界和生成结果校验。默认自动化测试只运行离线测试，不会调用模型或真实生成整套试卷。
 
 发布前先审阅工作区，确保源码、测试和文档都已提交；不要把 `config.toml`、`output/`、`tmp/` 或本地密钥加入版本控制。推送 `main` 后，再推送版本标签触发发布：
 
 ```bash
-git tag -a v0.1.1 -m "GoT0GenPaper v0.1.1"
+git tag -a v0.1.2 -m "GoT0GenPaper v0.1.2"
 git push origin main
-git push origin v0.1.1
+git push origin v0.1.2
 ```
 
 Release 页面会自动提供各平台的 `.tar.gz` 或 `.zip` 安装包。完整流程见 [`docs/CI-CD.md`](docs/CI-CD.md)。

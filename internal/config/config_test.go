@@ -104,7 +104,7 @@ func TestTOMLRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	cfg := Default()
 	cfg.Providers.Providers = append(cfg.Providers.Providers, ProviderConfig{
-		ID: "ollama", Name: "Ollama", BaseURL: "http://127.0.0.1:11434/v1", DefaultModel: "llama3.1", JudgeModel: "llama3.1", Enabled: true,
+		ID: "ollama", Name: "Ollama", BaseURL: "http://127.0.0.1:11434/v1", DefaultModel: "llama3.1", FallbackModel: "llama3.2", Enabled: true,
 		ModelByType: map[string]string{"choice": "llama3.1"}, ReasoningEffort: "low", MaxTokens: 2048,
 	})
 	cfg.Providers.ActiveID = "ollama"
@@ -120,6 +120,37 @@ func TestTOMLRoundTrip(t *testing.T) {
 	}
 	if loaded.ActiveProvider().ReasoningEffort != "low" || loaded.ActiveProvider().MaxTokens != 2048 {
 		t.Fatalf("TOML round trip lost LLM generation controls: %+v", loaded.ActiveProvider())
+	}
+	if loaded.ActiveProvider().FallbackModel != "llama3.2" {
+		t.Fatalf("fallback model = %q, want llama3.2", loaded.ActiveProvider().FallbackModel)
+	}
+}
+
+func TestLegacyJudgeModelMigratesToGenerationFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := []byte(`[providers]
+active_id = "legacy"
+
+[[providers.providers]]
+id = "legacy"
+name = "Legacy"
+base_url = "http://127.0.0.1:1234"
+default_model = "primary"
+judge_model = "backup"
+enabled = true
+`)
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ActiveProvider().FallbackModel; got != "backup" {
+		t.Fatalf("fallback model = %q, want legacy model backup", got)
+	}
+	if got := cfg.ActiveProvider().JudgeModel; got != "" {
+		t.Fatalf("legacy judge field should be normalized away, got %q", got)
 	}
 }
 

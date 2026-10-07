@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -93,7 +94,7 @@ func (v *Validator) Validate(ctx context.Context, paper models.ExamPaper, bp int
 	}
 
 	if bp != nil {
-		if blueprint, ok := bp.(*orchestrator.Blueprint); ok {
+		if blueprint, ok := bp.(*orchestrator.Blueprint); ok && blueprint != nil {
 			result.StructureIssues = append(result.StructureIssues, blueprintStructureIssues(paper, blueprint)...)
 			result.StructureOK = len(result.StructureIssues) == 0
 			for pt, floor := range blueprint.CoverageFloor {
@@ -123,7 +124,7 @@ func (v *Validator) Validate(ctx context.Context, paper models.ExamPaper, bp int
 	// Build target distribution from blueprint.
 	targetDist := make(map[models.DifficultyBand]float64)
 	if bp != nil {
-		if blueprint, ok := bp.(*orchestrator.Blueprint); ok {
+		if blueprint, ok := bp.(*orchestrator.Blueprint); ok && blueprint != nil {
 			for band, frac := range blueprint.DiffHist {
 				targetDist[band] = frac
 			}
@@ -213,6 +214,9 @@ func (v *Validator) Validate(ctx context.Context, paper models.ExamPaper, bp int
 		if len(quality.SubjectContentIssues(paper.Subject, q.Points, questionContent(q))) > 0 {
 			addViolation(q.SpecID)
 		}
+		if len(quality.Issues(q)) > 0 {
+			addViolation(q.SpecID)
+		}
 	}
 	if !result.CoverageOK {
 		// A missing point is absent from the generated questions, so looking at
@@ -247,7 +251,7 @@ func (v *Validator) Validate(ctx context.Context, paper models.ExamPaper, bp int
 		for _, q := range paper.Questions {
 			questionBySpec[q.SpecID] = q
 			if q.Status == "needs_review" || !finiteInRange(q.Difficulty, 0, 1) || !positiveFinite(q.Score) ||
-				blankOrPlaceholder(q.Stem) || blankOrPlaceholder(q.Answer) || hasIncompleteRubric(paper.Rubrics, q) {
+				blankOrPlaceholder(q.Stem) || blankOrPlaceholder(q.Answer) {
 				addViolation(q.SpecID)
 			}
 		}
@@ -411,23 +415,6 @@ func countsEqual(a, b map[models.DifficultyBand]int) bool {
 	return true
 }
 
-func hasIncompleteRubric(rubrics []models.Rubric, q models.GeneratedQuestion) bool {
-	for _, rubric := range rubrics {
-		if rubric.QuestionID != q.ID {
-			continue
-		}
-		total := 0.0
-		for _, item := range rubric.Items {
-			if !positiveFinite(item.MaxScore) || strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.Description) == "" {
-				return true
-			}
-			total += item.MaxScore
-		}
-		return len(rubric.Items) == 0 || !finiteInRange(total, q.Score-0.01, q.Score+0.01)
-	}
-	return true
-}
-
 func positiveFinite(value float64) bool {
 	return value > 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
 }
@@ -437,9 +424,8 @@ func finiteInRange(value, minValue, maxValue float64) bool {
 }
 
 // RepairLoop protocol (re-spec only violated题位, ≤3 rounds, then degrade to
-// candidate-pool selection) is orchestrated at the API layer, because repair
-// needs the generator (Stage 4) and answer service (Stage 5) — the validator
-// stays a pure checker. See api.go repairPaper.
+// candidate-pool selection) is orchestrated by the generation pipeline; the
+// validator stays a pure checker. See api.go repairPaper.
 
 // checkDuplicates finds duplicate questions within the paper and against
 // the past-exam database and generated pool.
@@ -592,11 +578,18 @@ func paperStructureIssues(paper models.ExamPaper) []string {
 			issues = append(issues, prefix+"题型无效: "+string(q.Type))
 		}
 		if q.Type == models.TypeChoice || q.Type == models.TypeMultiChoice {
-			if issue := choice.Validate(choice.Parse(q.Answer), q.Type == models.TypeMultiChoice); issue != "" {
+			labels := choice.Parse(q.Answer)
+			alphabet := "ABCD"
+			if models.IsEnglish2PartB(q.Points) {
+				alphabet = "ABCDEFG"
+				labels = choice.ParseWithAlphabet(q.Answer, alphabet)
+			}
+			if issue := choice.ValidateWithAlphabet(labels, q.Type == models.TypeMultiChoice, alphabet); issue != "" {
 				issues = append(issues, prefix+"标准答案选项无效")
 			}
 		}
 	}
+	issues = append(issues, English2StructureIssues(paper)...)
 	if len(paper.Questions) > 0 && !finiteInRange(paper.TotalScore, questionScore-0.01, questionScore+0.01) {
 		issues = append(issues, "试卷总分与题目分值之和不一致")
 	}
@@ -651,6 +644,253 @@ func paperStructureIssues(paper models.ExamPaper) []string {
 	return issues
 }
 
+var englishWordToken = regexp.MustCompile(`(?i)[a-z]+(?:['’][a-z]+)?`)
+var englishNumericToken = regexp.MustCompile(`\d+(?:\.\d+)?\s*%?`)
+var english2ClozeMarker = regexp.MustCompile(`\[(\d{1,2})\]`)
+var english2StatementPrefix = regexp.MustCompile(`(?i)^[A-G][.)、:]\s*`)
+var english2PersonName = regexp.MustCompile(`^[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,4}$`)
+
+// English2StructureIssues checks the fixed question map and composite-material
+// relationships of the 2026 English II paper. It intentionally does not infer
+// validity from the aggregate count or score alone.
+func English2StructureIssues(paper models.ExamPaper) []string {
+	subject := strings.ToLower(strings.TrimSpace(paper.Subject))
+	if subject != "english2" && subject != "英语二" {
+		return nil
+	}
+	var issues []string
+	if len(paper.Questions) != 48 {
+		issues = append(issues, fmt.Sprintf("英语二 2026 结构要求 48 题，当前 %d 题", len(paper.Questions)))
+	}
+	byPosition := make(map[int]models.GeneratedQuestion, len(paper.Questions))
+	for index, question := range paper.Questions {
+		position, ok := models.EnglishQuestionPosition(question.Points)
+		if !ok || position < 1 || position > 48 {
+			issues = append(issues, fmt.Sprintf("第%d题缺少 1-48 范围内的官方英语题位", index+1))
+			continue
+		}
+		if _, exists := byPosition[position]; exists {
+			issues = append(issues, fmt.Sprintf("英语题位 %d 重复", position))
+			continue
+		}
+		byPosition[position] = question
+		if position != index+1 {
+			issues = append(issues, fmt.Sprintf("第%d个题目位置应为官方题号 %d，当前标记为 %d", index+1, index+1, position))
+		}
+		wantType, wantScore := models.TypeChoice, 2.0
+		switch {
+		case position <= 20:
+			wantScore = 0.5
+		case position == 46:
+			wantType, wantScore = models.TypeMajor, 15
+		case position == 47:
+			wantType, wantScore = models.TypeMajor, 10
+		case position == 48:
+			wantType, wantScore = models.TypeMajor, 15
+		}
+		if question.Type != wantType || math.Abs(question.Score-wantScore) > 0.01 {
+			issues = append(issues, fmt.Sprintf("英语题位 %d 应为 %s、%.1f 分", position, wantType, wantScore))
+		}
+		if issue := english2PointPathIssue(question.Points, position); issue != "" {
+			issues = append(issues, issue)
+		}
+		if position <= 40 && len(question.SharedOptions) > 0 {
+			issues = append(issues, fmt.Sprintf("英语题位 %d 的 Part A/完形题不应携带共享小标题", position))
+		}
+		if position >= 46 && (question.GroupID != "" || strings.TrimSpace(question.SharedMaterial) != "" || len(question.SharedOptions) > 0) {
+			issues = append(issues, fmt.Sprintf("英语题位 %d 属于翻译/写作，不应携带复合题组材料", position))
+		}
+	}
+	for position := 1; position <= 48; position++ {
+		if _, exists := byPosition[position]; !exists {
+			issues = append(issues, fmt.Sprintf("缺少英语题位 %d", position))
+		}
+	}
+	if len(byPosition) != 48 {
+		return uniqueIssues(issues)
+	}
+
+	checkSharedGroup := func(start, end int, groupID string) string {
+		material := strings.TrimSpace(byPosition[start].SharedMaterial)
+		if material == "" {
+			issues = append(issues, fmt.Sprintf("题位 %d-%d 缺少共用材料", start, end))
+		}
+		for position := start; position <= end; position++ {
+			question := byPosition[position]
+			if question.GroupID != groupID {
+				issues = append(issues, fmt.Sprintf("题位 %d 未绑定题组 %s", position, groupID))
+			}
+			if strings.TrimSpace(question.SharedMaterial) != material {
+				issues = append(issues, fmt.Sprintf("题位 %d 与题组共用材料不一致", position))
+			}
+		}
+		return material
+	}
+	cloze := checkSharedGroup(1, 20, "english2-cloze")
+	clozeMarkers := make(map[int]int, 20)
+	for _, match := range english2ClozeMarker.FindAllStringSubmatch(cloze, -1) {
+		var number int
+		if _, err := fmt.Sscanf(match[1], "%d", &number); err != nil || number < 1 || number > 20 {
+			issues = append(issues, "完形填空共用文章只能包含 [1] 至 [20] 编号空")
+			continue
+		}
+		clozeMarkers[number]++
+	}
+	for number := 1; number <= 20; number++ {
+		if clozeMarkers[number] != 1 {
+			issues = append(issues, fmt.Sprintf("完形填空共用文章必须恰有一个 [%d] 空位", number))
+		}
+	}
+	if len(englishWordToken.FindAllString(cloze, -1)) < 180 {
+		issues = append(issues, "完形填空共用文章过短，至少需要 180 个英文词")
+	}
+	for text := 1; text <= 4; text++ {
+		start := 21 + (text-1)*5
+		end := start + 4
+		groupID := fmt.Sprintf("english2-reading-%d", text)
+		material := checkSharedGroup(start, end, groupID)
+		if len(englishWordToken.FindAllString(material, -1)) < 180 {
+			issues = append(issues, fmt.Sprintf("Part A Text %d 共用文章过短，不能支撑一组阅读题", text))
+		}
+		for position := start; position <= end; position++ {
+			if strings.TrimSpace(byPosition[position].Stem) == strings.TrimSpace(material) {
+				issues = append(issues, fmt.Sprintf("Part A 题位 %d 重复携带整篇文章，题组应引用共享材料", position))
+			}
+		}
+	}
+	partB := checkSharedGroup(41, 45, "english2-part-b")
+	if len(englishWordToken.FindAllString(partB, -1)) < 180 {
+		issues = append(issues, "Part B 共用文章过短，不能支撑完整的人物观点匹配任务")
+	}
+	sharedStatements := byPosition[41].SharedOptions
+	if len(sharedStatements) != 7 {
+		issues = append(issues, "Part B 必须共用 A-G 七个观点陈述，含两个干扰项")
+	}
+	seenStatements := make(map[string]bool, len(sharedStatements))
+	for _, statement := range sharedStatements {
+		value := strings.TrimSpace(statement)
+		if value == "" || seenStatements[value] || english2StatementPrefix.MatchString(value) {
+			issues = append(issues, "Part B 观点陈述必须非空、互不重复且不自带 A-G 标签")
+		}
+		seenStatements[value] = true
+	}
+	seenTargets := make(map[string]bool, 5)
+	seenAnswers := make(map[string]bool, 5)
+	for position := 41; position <= 45; position++ {
+		question := byPosition[position]
+		if !sameStrings(question.SharedOptions, sharedStatements) || !sameStrings(question.Options, sharedStatements) {
+			issues = append(issues, fmt.Sprintf("Part B 题位 %d 未使用统一的七个共享观点陈述", position))
+		}
+		if issue := choice.ValidateWithAlphabet(choice.ParseWithAlphabet(question.Answer, "ABCDEFG"), false, "ABCDEFG"); issue != "" {
+			issues = append(issues, fmt.Sprintf("Part B 题位 %d 答案必须是 A-G 中一个字母", position))
+		} else {
+			answer := choice.ParseWithAlphabet(question.Answer, "ABCDEFG")[0]
+			if seenAnswers[answer] {
+				issues = append(issues, "Part B 五题答案必须一一匹配，不能重复使用标题")
+			}
+			seenAnswers[answer] = true
+		}
+		target := strings.TrimSpace(question.Stem)
+		if !english2PersonName.MatchString(target) {
+			issues = append(issues, fmt.Sprintf("Part B 题位 %d 必须填写一位完整英文姓名，不能使用 Paragraph、题号或其他题型", position))
+		} else if !strings.Contains(strings.ToLower(partB), strings.ToLower(target)) {
+			issues = append(issues, fmt.Sprintf("Part B 题位 %d 的人物姓名未出现在共用材料中", position))
+		}
+		targetKey := strings.ToLower(target)
+		if seenTargets[targetKey] {
+			issues = append(issues, fmt.Sprintf("Part B 题位 %d 重复使用人物目标", position))
+		}
+		seenTargets[targetKey] = true
+	}
+	if len(englishWordToken.FindAllString(byPosition[46].Stem, -1)) < 60 {
+		issues = append(issues, "Part C 须提供整段英文材料，不能只给孤立句子")
+	}
+	writingA := strings.ToLower(byPosition[47].Stem)
+	if !strings.Contains(writingA, "email") && !strings.Contains(writingA, "letter") && !strings.Contains(writingA, "application") {
+		issues = append(issues, "写作 Part A 须明确给出应用文任务")
+	}
+	writingB := strings.ToLower(byPosition[48].Stem)
+	if !strings.Contains(writingB, "chart") && !strings.Contains(writingB, "table") && !strings.Contains(writingB, "图表") && !strings.Contains(writingB, "表格") {
+		issues = append(issues, "写作 Part B 须明确提供图表或表格任务")
+	}
+	if len(englishNumericToken.FindAllString(byPosition[48].Stem, -1)) < 3 {
+		issues = append(issues, "写作 Part B 图表必须包含至少三个明确数据值")
+	}
+	return uniqueIssues(issues)
+}
+
+// english2PointPathIssue keeps the official 2026 section map authoritative at
+// the final-paper boundary. Generation validates the same map before calling
+// the model, but cached or repaired papers can enter validation later.
+func english2PointPathIssue(points []string, position int) string {
+	if len(points) == 0 {
+		return fmt.Sprintf("英语题位 %d 缺少知识点路径", position)
+	}
+	subject := strings.ToLower(strings.TrimSpace(points[0]))
+	if subject != "english2" && subject != "英语二" {
+		return fmt.Sprintf("英语题位 %d 的科目标识错误：要求 english2/英语二", position)
+	}
+	require := func(index int, want string) bool {
+		return len(points) > index && strings.EqualFold(strings.TrimSpace(points[index]), want)
+	}
+	switch {
+	case position <= 20:
+		if !require(1, "完形填空") {
+			return fmt.Sprintf("英语题位 %d 必须属于完形填空", position)
+		}
+	case position <= 40:
+		text := (position-21)/5 + 1
+		if !require(1, "阅读理解") || !require(2, "Part A") || !require(3, fmt.Sprintf("Text %d", text)) {
+			return fmt.Sprintf("英语题位 %d 必须属于阅读理解 Part A Text %d", position, text)
+		}
+	case position <= 45:
+		if !require(1, "阅读理解") || !require(2, "Part B") || len(points) <= 3 {
+			return fmt.Sprintf("英语题位 %d 必须属于阅读理解 Part B", position)
+		}
+		matchType := strings.TrimSpace(points[3])
+		if !models.IsEnglish2PartBMatchType(matchType) {
+			return fmt.Sprintf("英语题位 %d 的 Part B 必须是人物观点匹配", position)
+		}
+	case position == 46:
+		if !require(1, "翻译") || !require(2, "英译汉") {
+			return "英语题位 46 必须是翻译（英译汉）"
+		}
+	case position == 47:
+		if !require(1, "写作") || !require(2, "应用文") {
+			return "英语题位 47 必须是写作 Part A 应用文"
+		}
+	case position == 48:
+		if !require(1, "写作") || len(points) <= 2 || !strings.Contains(strings.TrimSpace(points[2]), "图表") {
+			return "英语题位 48 必须是写作 Part B 图表作文"
+		}
+	}
+	return ""
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if strings.TrimSpace(left[i]) != strings.TrimSpace(right[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func uniqueIssues(issues []string) []string {
+	seen := make(map[string]bool, len(issues))
+	result := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		if !seen[issue] {
+			seen[issue] = true
+			result = append(result, issue)
+		}
+	}
+	return result
+}
+
 func paperContentIssues(paper models.ExamPaper) []string {
 	issues := make([]string, 0)
 	if len(paper.Questions) == 0 {
@@ -677,8 +917,9 @@ func paperContentIssues(paper models.ExamPaper) []string {
 			issues = append(issues, label+issue)
 		}
 		if q.Type == models.TypeChoice || q.Type == models.TypeMultiChoice {
-			if len(q.Options) != 4 {
-				issues = append(issues, fmt.Sprintf("%s选项数量为%d", label, len(q.Options)))
+			wantOptions := quality.ExpectedChoiceOptionCount(q)
+			if len(q.Options) != wantOptions {
+				issues = append(issues, fmt.Sprintf("%s选项数量为%d，要求%d", label, len(q.Options), wantOptions))
 			} else {
 				seenOptions := make(map[string]struct{}, len(q.Options))
 				for option, value := range q.Options {
@@ -694,62 +935,14 @@ func paperContentIssues(paper models.ExamPaper) []string {
 			}
 		}
 	}
-	rubrics := make(map[string]models.Rubric, len(paper.Rubrics))
-	questionIDs := make(map[string]struct{}, len(paper.Questions))
-	for _, q := range paper.Questions {
-		questionIDs[q.ID] = struct{}{}
-	}
-	for _, rubric := range paper.Rubrics {
-		id := strings.TrimSpace(rubric.QuestionID)
-		if id == "" {
-			issues = append(issues, "评分标准缺少题目 ID")
-			continue
-		}
-		if _, exists := rubrics[id]; exists {
-			issues = append(issues, "评分标准重复定义: "+id)
-			continue
-		}
-		rubrics[id] = rubric
-		if _, exists := questionIDs[id]; !exists {
-			issues = append(issues, "评分标准引用未知题目: "+id)
-		}
-		if len(rubric.Items) == 0 {
-			issues = append(issues, "题目 "+id+" 的评分标准为空")
-			continue
-		}
-		seenItems := make(map[string]struct{}, len(rubric.Items))
-		total := 0.0
-		for _, item := range rubric.Items {
-			itemID := strings.TrimSpace(item.ID)
-			if itemID == "" {
-				issues = append(issues, "题目 "+id+" 的评分标准包含空检查点 ID")
-			}
-			if _, exists := seenItems[itemID]; exists && itemID != "" {
-				issues = append(issues, "题目 "+id+" 的评分标准包含重复检查点: "+itemID)
-			}
-			seenItems[itemID] = struct{}{}
-			if item.MaxScore <= 0 || math.IsNaN(item.MaxScore) || math.IsInf(item.MaxScore, 0) {
-				issues = append(issues, "题目 "+id+" 的评分标准包含无效分值")
-			} else {
-				total += item.MaxScore
-			}
-		}
-		for _, q := range paper.Questions {
-			if q.ID == id && (math.IsNaN(total) || math.IsInf(total, 0) || math.Abs(total-q.Score) > 0.01) {
-				issues = append(issues, fmt.Sprintf("题目 %s 的评分标准总分 %.2f 与题目分值 %.2f 不一致", id, total, q.Score))
-			}
-		}
-	}
-	for _, q := range paper.Questions {
-		if _, exists := rubrics[q.ID]; !exists {
-			issues = append(issues, "题目 "+q.ID+" 缺少评分标准")
-		}
-	}
 	return issues
 }
 
 func questionContent(q models.GeneratedQuestion) string {
-	return strings.Join(append([]string{q.Stem, q.Answer}, q.Options...), "\n")
+	parts := []string{q.Stem, q.SharedMaterial, q.Answer}
+	parts = append(parts, q.Options...)
+	parts = append(parts, q.SharedOptions...)
+	return strings.Join(parts, "\n")
 }
 
 func blankOrPlaceholder(value string) bool {

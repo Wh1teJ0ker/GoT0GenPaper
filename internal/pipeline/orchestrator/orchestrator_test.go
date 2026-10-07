@@ -35,6 +35,54 @@ func TestAllocateDifficultyCountsUsesLargestRemainder(t *testing.T) {
 	}
 }
 
+func TestComposeOrdersPoliticalQuestionTypesForExamLayout(t *testing.T) {
+	blueprint := &Blueprint{
+		Subject:        "政治",
+		TotalScore:     100,
+		TypeQuota:      map[models.QuestionType]float64{models.TypeChoice: 16, models.TypeMultiChoice: 34, models.TypeMajor: 50},
+		TypeCountQuota: map[models.QuestionType]int{models.TypeChoice: 16, models.TypeMultiChoice: 17, models.TypeMajor: 5},
+		NumQuestions:   38,
+	}
+	var candidates []models.PastQuestion
+	for _, item := range []struct {
+		questionType models.QuestionType
+		count        int
+		score        float64
+		point        string
+	}{
+		{models.TypeChoice, 16, 1, "single"},
+		{models.TypeMultiChoice, 17, 2, "multi"},
+		{models.TypeMajor, 5, 10, "major"},
+	} {
+		for i := 0; i < item.count; i++ {
+			candidates = append(candidates, models.PastQuestion{
+				ID: fmt.Sprintf("%s_%d", item.point, i), Type: item.questionType,
+				Points: []string{fmt.Sprintf("%s_%d", item.point, i)}, Score: item.score,
+				Difficulty: 0.5, Cognitive: models.CogApply,
+			})
+		}
+	}
+
+	spec, err := New(nil, nil).Compose(context.Background(), blueprint, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []models.QuestionType{models.TypeChoice, models.TypeMultiChoice, models.TypeMajor}
+	lastOrder := -1
+	counts := make(map[models.QuestionType]int)
+	for _, entry := range spec.Entries {
+		order := questionTypeOrder(entry.Type)
+		if order < lastOrder {
+			t.Fatalf("question type %s appears after a later section", entry.Type)
+		}
+		lastOrder = order
+		counts[entry.Type]++
+	}
+	if counts[want[0]] != 16 || counts[want[1]] != 17 || counts[want[2]] != 5 {
+		t.Fatalf("composed political type counts = %#v", counts)
+	}
+}
+
 func TestDifficultyTargetCountsPrefersExplicitCounts(t *testing.T) {
 	bp := &Blueprint{
 		DiffHist:              map[models.DifficultyBand]float64{models.BandEasy: 1, models.BandMedium: 0, models.BandHard: 0},
@@ -196,7 +244,7 @@ func TestFixedCountTopUpUsesRealDisciplinePoints(t *testing.T) {
 
 func TestStrictDifficultyCandidatesKeepSyllabusBackedPoints(t *testing.T) {
 	used := make(map[string]bool)
-	points := nextSyntheticPointSet("高等数学", models.TypeChoice, used, 0)
+	points := nextSyntheticPointSet("math2", "高等数学", models.TypeChoice, used, 0)
 	if len(points) == 0 {
 		t.Fatal("nextSyntheticPointSet returned no candidate")
 	}

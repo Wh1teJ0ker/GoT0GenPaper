@@ -23,12 +23,12 @@ type Config struct {
 }
 
 type NewAPIConfig struct {
-	BaseURL      string            `json:"baseUrl" toml:"base_url"`
-	APIKey       string            `json:"apiKey" toml:"api_key"`
-	ModelByType  map[string]string `json:"modelByType" toml:"model_by_type"`
-	JudgeModel   string            `json:"judgeModel" toml:"judge_model"`
-	VisionModel  string            `json:"visionModel" toml:"vision_model"`
-	DefaultModel string            `json:"defaultModel" toml:"default_model"`
+	BaseURL       string            `json:"baseUrl" toml:"base_url"`
+	APIKey        string            `json:"apiKey" toml:"api_key"`
+	ModelByType   map[string]string `json:"modelByType" toml:"model_by_type"`
+	FallbackModel string            `json:"fallbackModel,omitempty" toml:"fallback_model,omitempty"`
+	JudgeModel    string            `json:"judgeModel,omitempty" toml:"judge_model,omitempty"`
+	DefaultModel  string            `json:"defaultModel" toml:"default_model"`
 }
 
 type ProviderConfig struct {
@@ -37,8 +37,8 @@ type ProviderConfig struct {
 	BaseURL         string            `json:"baseUrl" toml:"base_url"`
 	APIKey          string            `json:"apiKey" toml:"api_key"`
 	ModelByType     map[string]string `json:"modelByType" toml:"model_by_type"`
-	JudgeModel      string            `json:"judgeModel" toml:"judge_model"`
-	VisionModel     string            `json:"visionModel" toml:"vision_model"`
+	FallbackModel   string            `json:"fallbackModel,omitempty" toml:"fallback_model,omitempty"`
+	JudgeModel      string            `json:"judgeModel,omitempty" toml:"judge_model,omitempty"`
 	DefaultModel    string            `json:"defaultModel" toml:"default_model"`
 	ReasoningEffort string            `json:"reasoningEffort,omitempty" toml:"reasoning_effort,omitempty"`
 	MaxTokens       int               `json:"maxTokens,omitempty" toml:"max_tokens,omitempty"`
@@ -62,9 +62,8 @@ func Default() *Config {
 	templatesDir := filepath.Join(AppDataDir(), "templates")
 	provider := ProviderConfig{
 		ID: "deepseek", Name: "DeepSeek", BaseURL: "https://api.deepseek.com", Enabled: true,
-		ModelByType: map[string]string{"choice": "deepseek-v4.1-flash", "fill_blank": "deepseek-v4.1-flash", "major": "deepseek-v4.1-flash"},
-		JudgeModel:  "deepseek-v4.1-flash", DefaultModel: "deepseek-v4.1-flash",
-		VisionModel: "deepseek-v4.1-flash",
+		ModelByType:  map[string]string{"choice": "deepseek-v4.1-flash", "fill_blank": "deepseek-v4.1-flash", "major": "deepseek-v4.1-flash"},
+		DefaultModel: "deepseek-v4.1-flash",
 	}
 	cfg := &Config{
 		Providers: ProvidersConfig{ActiveID: provider.ID, Providers: []ProviderConfig{provider}},
@@ -194,11 +193,10 @@ func applyEnvOverrides(cfg *Config) {
 	if value := os.Getenv("NEWAPI_MODEL_MAJOR"); value != "" {
 		p.ModelByType["major"] = value
 	}
-	if value := os.Getenv("NEWAPI_MODEL_JUDGE"); value != "" {
-		p.JudgeModel = value
-	}
-	if value := os.Getenv("NEWAPI_MODEL_VISION"); value != "" {
-		p.VisionModel = value
+	if value := os.Getenv("NEWAPI_MODEL_FALLBACK"); value != "" {
+		p.FallbackModel = value
+	} else if value := os.Getenv("NEWAPI_MODEL_JUDGE"); value != "" {
+		p.FallbackModel = value
 	}
 	if value := os.Getenv("NEWAPI_MODEL_DEFAULT"); value != "" {
 		p.DefaultModel = value
@@ -215,6 +213,10 @@ func (c *Config) Normalize() {
 	}
 	for i := range c.Providers.Providers {
 		p := &c.Providers.Providers[i]
+		if p.FallbackModel == "" {
+			p.FallbackModel = p.JudgeModel
+		}
+		p.JudgeModel = ""
 		if p.ID == "" {
 			p.ID = fmt.Sprintf("provider-%d", i+1)
 		}
@@ -262,11 +264,15 @@ func (c *Config) SyncLegacy() {
 	if p == nil {
 		return
 	}
-	c.NewAPI = NewAPIConfig{BaseURL: p.BaseURL, APIKey: p.APIKey, ModelByType: cloneModels(p.ModelByType), JudgeModel: p.JudgeModel, VisionModel: p.VisionModel, DefaultModel: p.DefaultModel}
+	c.NewAPI = NewAPIConfig{BaseURL: p.BaseURL, APIKey: p.APIKey, ModelByType: cloneModels(p.ModelByType), FallbackModel: p.FallbackModel, JudgeModel: p.FallbackModel, DefaultModel: p.DefaultModel}
 }
 
 func providerFromLegacy(legacy NewAPIConfig) ProviderConfig {
-	return ProviderConfig{ID: "default", Name: "默认供应商", BaseURL: legacy.BaseURL, APIKey: legacy.APIKey, ModelByType: cloneModels(legacy.ModelByType), JudgeModel: legacy.JudgeModel, VisionModel: legacy.VisionModel, DefaultModel: legacy.DefaultModel, Enabled: true}
+	fallback := legacy.FallbackModel
+	if fallback == "" {
+		fallback = legacy.JudgeModel
+	}
+	return ProviderConfig{ID: "default", Name: "默认供应商", BaseURL: legacy.BaseURL, APIKey: legacy.APIKey, ModelByType: cloneModels(legacy.ModelByType), FallbackModel: fallback, DefaultModel: legacy.DefaultModel, Enabled: true}
 }
 
 func cloneModels(src map[string]string) map[string]string {

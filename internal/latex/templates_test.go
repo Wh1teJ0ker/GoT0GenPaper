@@ -104,6 +104,7 @@ func TestDecideOptionLayout(t *testing.T) {
 		{[]string{"栈", "队列", "树", "图"}, optionsInline4},
 		{[]string{"90 ns", "80 ns", "70 ns", "60 ns"}, optionsInline4},
 		{[]string{"指令操作码的译码结果", "指令和数据的寻址方式", "指令周期的不同阶段", "指令和数据所在的存储单元"}, optionsInline2},
+		{[]string{`A. $\frac{f(a)}{a}$`, `B. $-\frac{f(a)}{a}$`, `C. $\frac{2f(a)}{a}$`, `D. $-\frac{2f(a)}{a}$`}, optionsStacked},
 		{[]string{"x=000007FH，y=FFF9H，z=0000076H", "x=000007FH，y=FFF9H，z=FFFF0076H"}, optionsStacked},
 	}
 	for _, c := range cases {
@@ -129,13 +130,32 @@ func TestRenderOptionsLayouts(t *testing.T) {
 	if strings.Contains(out, "\\quad") {
 		t.Errorf("stacked options must not join with \\quad, got %q", out)
 	}
+	formulaOptions := []string{`A. $\frac{f(a)}{a}$`, `B. $-\frac{f(a)}{a}$`, `C. $\frac{2f(a)}{a}$`, `D. $-\frac{2f(a)}{a}$`}
+	out = renderOptions(formulaOptions)
+	if strings.Count(out, "\n\n") != 3 || strings.Contains(out, "\\quad") {
+		t.Errorf("long formula options should render one per row, got %q", out)
+	}
+}
+
+func TestClozeQuestionUsesOneCompactFourChoiceRow(t *testing.T) {
+	out := ClozeQuestion(1, []string{"diminish", "enhance", "complicate", "postpone"})
+	for _, want := range []string{"\\begin{tabularx}", "1．", "A．diminish", "B．enhance", "C．complicate", "D．postpone"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("cloze output missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "Blank [1]") || strings.Contains(out, "\\quad") {
+		t.Fatalf("cloze output should not use ordinary question layout: %q", out)
+	}
 }
 
 func TestEscapeLaTeX(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"100% 正确", `100\% 正确`},
 		{"a & b # c _ d", `a \& b \# c \_ d`},
-		{"$x_1 + y_2$ 保持", `$x_1 + y_2$ 保持`}, // math untouched
+		{`ack\_seq and 40\%`, `ack\_seq and 40\%`},   // pre-escaped source remains valid
+		{`ack\\_seq and 40\\%`, `ack\_seq and 40\%`}, // duplicate prefixes collapse
+		{"$x_1 + y_2$ 保持", `$x_1 + y_2$ 保持`},         // math untouched
 		{`\(x^2 + y^2\) 且 α∈Ω`, `\(x^2 + y^2\) 且 \ensuremath{\alpha}\ensuremath{\in}\ensuremath{\Omega}`},
 		{`√2 和 ∛x`, `\ensuremath{\sqrt{2}} 和 \ensuremath{\sqrt[3]{x}}`},
 		{"复述 ( ): 正确", `复述 ( ): 正确`},
@@ -145,6 +165,10 @@ func TestEscapeLaTeX(t *testing.T) {
 		{`填空：______。`, `填空：\underline{\quad\quad}。`},
 		{`$\lim_{x\to 0⁻} f(x)$ 与 $0⁺$`, `$\lim_{x\to 0^-} f(x)$ 与 $0^+$`},
 		{`文本 0⁻`, `文本 0\textsuperscript{-}`},
+		{"损坏的 $\x0crac{\\\x00partial z}{\x00partial x}$", `损坏的 $\frac{\partial z}{\partial x}$`},
+		{`$\begin{cases}\nk_1=0 \\\nk_2=0\end{cases}$`, `$\begin{cases}
+k_1=0 \\
+k_2=0\end{cases}$`},
 	}
 	for _, c := range cases {
 		if got := escapeLaTeX(c.in); got != c.want {
@@ -220,6 +244,38 @@ func TestCleanMarkdownStem(t *testing.T) {
 	}
 }
 
+func TestEscapeLaTeXMakesLongUnderlinedTextBreakable(t *testing.T) {
+	content := strings.Repeat("A long translation sentence that must wrap across lines. ", 3)
+	out := escapeLaTeX(`\underline{` + content + `}`)
+	if strings.Contains(out, `\underline{`) || !strings.Contains(out, `\textbf{`) {
+		t.Fatalf("long underline was not made breakable: %q", out)
+	}
+	if got := escapeLaTeX(`\underline{\quad\quad}`); got != `\underline{\quad\quad}` {
+		t.Fatalf("short answer blank changed: %q", got)
+	}
+}
+
+func TestEscapeLaTeXUnwrapsLongItalicPassage(t *testing.T) {
+	content := strings.Repeat("A readable passage with enough words to exercise line breaking. ", 3)
+	out := escapeLaTeX(`\textit{` + content + `}`)
+	if strings.Contains(out, `\textit{`) || !strings.Contains(out, "readable passage") {
+		t.Fatalf("long italic wrapper was not normalized: %q", out)
+	}
+}
+
+func TestEscapeLaTeXFlattensGeneratedTableWithoutDroppingData(t *testing.T) {
+	in := `\begin{table}[h] \centering \caption{Survey} \begin{tabular}{|l|c|} \hline Mode \& 2023 \\ \hline Bus \& 40\% \\ \hline \end{tabular} \end{table}`
+	out := escapeLaTeX(in)
+	if strings.Contains(out, `\begin{table}`) || strings.Contains(out, `\begin{tabular}`) {
+		t.Fatalf("generated table environment was retained: %q", out)
+	}
+	for _, want := range []string{"Mode", "2023", "Bus", "40"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("table data %q was lost: %q", want, out)
+		}
+	}
+}
+
 // TestEscapeLaTeXDisplayMath pins the \[…\] handling: array & and _ must
 // stay raw inside display math, and CleanMarkdownStem must not fold math
 // lines as fragments (a blank line inside \[…\] is a LaTeX error — this is
@@ -275,6 +331,28 @@ func TestCleanMarkdownStemLiteralNewline(t *testing.T) {
 		if !strings.Contains(out, keep) {
 			t.Errorf("LaTeX command %q corrupted: %q", keep, out)
 		}
+	}
+}
+
+func TestCleanMarkdownStemLiteralNewlineBeforeEnglishWord(t *testing.T) {
+	in := `第一段内容\nAccording to the passage, the answer is C.\nDear Mr. Smith,`
+	out := CleanMarkdownStem(in)
+	if !strings.Contains(out, "内容\nAccording") || !strings.Contains(out, "C.\nDear") {
+		t.Fatalf("literal English newlines were not converted: %q", out)
+	}
+	if strings.Contains(out, `\nAccording`) || strings.Contains(out, `\nDear`) {
+		t.Fatalf("literal newline escaped as TeX command: %q", out)
+	}
+}
+
+func TestEscapeLaTeXUnwrapsTextAroundProseButKeepsMathText(t *testing.T) {
+	in := `\text{A long English sentence that should wrap normally.} $\text{inside math}$`
+	out := escapeLaTeX(in)
+	if strings.Contains(out, `\text{A long`) {
+		t.Fatalf("ordinary prose wrapper survived: %q", out)
+	}
+	if !strings.Contains(out, `\text{inside math}`) {
+		t.Fatalf("math text wrapper was removed: %q", out)
 	}
 }
 
@@ -349,58 +427,14 @@ func TestExamPreambleCoversCommonUnicodeGlyphs(t *testing.T) {
 		`\newunicodechar{Ⅱ}{\ensuremath{\mathrm{II}}}`,
 		`\newunicodechar{Ⅲ}{\ensuremath{\mathrm{III}}}`,
 		`\newunicodechar{Ⅳ}{\ensuremath{\mathrm{IV}}}`,
+		`\newunicodechar{①}{\textcircled{1}}`,
+		`\newunicodechar{②}{\textcircled{2}}`,
+		`\newunicodechar{③}{\textcircled{3}}`,
+		`\newunicodechar{④}{\textcircled{4}}`,
 		`\newunicodechar{Р}{P}`,
 	} {
 		if !strings.Contains(preamble, want) {
 			t.Errorf("preamble missing Unicode glyph mapping %q", want)
 		}
-	}
-}
-
-func TestAnswerSheetStructure(t *testing.T) {
-	spec := AnswerSheetSpec{
-		Title:               "全国硕士研究生招生考试",
-		CardName:            "计算机学科专业学位联考答题卡1",
-		ChoiceSection:       "一、单项选择题:1～40小题,每小题2分,共80分。",
-		ChoiceNums:          []int{1, 2, 3, 4},
-		FillSection:         "二、填空题:11～16小题,共30分。",
-		FillNums:            []int{11},
-		MajorSection:        "三、综合应用题:41～47小题,共70分。",
-		MajorNums:           []int{41, 42},
-		BarcodeOnFirstMajor: true,
-	}
-	doc := AnswerSheet(spec)
-	for _, want := range []string{
-		"\\color{examred}\\zihao{3}\\bfseries 计算机学科专业学位联考答题卡1",
-		"准考证号(左对齐)",
-		"注\\ 意\\ 事\\ 项",
-		"一、单项选择题:1～40小题,每小题2分,共80分。",
-		"\\bubble{A}",
-		"阴影部分请勿作答或做任何标记",
-		"二、填空题:11～16小题,共30分。",
-		"三、综合应用题:41～47小题,共70分。",
-		"\\fillbox", "{11}", "\\majorbox", "{41}", "{42}",
-		"考生姓名",
-		"考生信息条形码粘贴位置",
-		"\\pageref{LastPage}",
-		"\\AddToShipoutPictureBG",
-	} {
-		if !strings.Contains(doc, want) {
-			t.Errorf("answer sheet missing %q", want)
-		}
-	}
-}
-
-func TestAnswerSheetSplitsLargeObjectiveSection(t *testing.T) {
-	nums := make([]int, 41)
-	for i := range nums {
-		nums[i] = i + 1
-	}
-	doc := AnswerSheet(AnswerSheetSpec{Title: "T", CardName: "C", ChoiceSection: "选择题", ChoiceNums: nums, ChoicePageSize: 40})
-	if strings.Count(doc, "\\begin{document}") != 1 || strings.Count(doc, "\\clearpage") != 1 {
-		t.Fatalf("unexpected page breaks")
-	}
-	if !strings.Contains(doc, "本页 1～40 题") || !strings.Contains(doc, "本页 41～41 题") {
-		t.Fatalf("page ranges missing")
 	}
 }

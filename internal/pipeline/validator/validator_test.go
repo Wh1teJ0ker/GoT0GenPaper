@@ -40,6 +40,132 @@ func TestValidateRejectsInvalidQuestionShape(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsMissingTypedBlueprintWithoutPanic(t *testing.T) {
+	var blueprint *orchestrator.Blueprint
+	paper := models.ExamPaper{
+		Subject:    "英语二",
+		Questions:  []models.GeneratedQuestion{{ID: "q1", Type: models.TypeChoice, Score: 2, Difficulty: 0.5, Stem: "题面", Answer: "答案：A。根据上下文可知。"}},
+		TotalScore: 2,
+	}
+	result, err := New(nil).Validate(context.Background(), paper, blueprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil {
+		t.Fatal("typed nil blueprint returned nil result")
+	}
+}
+
+func TestEnglish2StructureRequires2026CompositeGroups(t *testing.T) {
+	paper := english2StructureFixture()
+	if issues := English2StructureIssues(paper); len(issues) != 0 {
+		t.Fatalf("valid 2026 English II fixture rejected: %v", issues)
+	}
+
+	broken := english2StructureFixture()
+	broken.Questions[21].GroupID = "english2-reading-2"
+	broken.Questions[42].Options = []string{"A", "B", "C", "D"}
+	issues := English2StructureIssues(broken)
+	joined := strings.Join(issues, " ")
+	if !strings.Contains(joined, "题位 22 未绑定题组") || !strings.Contains(joined, "统一的七个共享观点陈述") {
+		t.Fatalf("independent reading/Part B options were accepted: %v", issues)
+	}
+}
+
+func TestEnglish2StructureRejectsDuplicateClozeMarkerAndPartBNamedViewpointFormat(t *testing.T) {
+	paper := english2StructureFixture()
+	paper.Questions[0].SharedMaterial = strings.Replace(paper.Questions[0].SharedMaterial, "[1]", "[10]", 1)
+	for position := 1; position <= 20; position++ {
+		paper.Questions[position-1].SharedMaterial = paper.Questions[0].SharedMaterial
+	}
+	for position := 41; position <= 45; position++ {
+		paper.Questions[position-1].Stem = fmt.Sprintf("Dr Expert %d", position-40)
+	}
+	issues := strings.Join(English2StructureIssues(paper), " ")
+	for _, want := range []string{"完形填空共用文章必须恰有一个 [1] 空位", "必须填写一位完整英文姓名"} {
+		if !strings.Contains(issues, want) {
+			t.Fatalf("invalid paper did not report %q: %s", want, issues)
+		}
+	}
+}
+
+func TestEnglish2StructureRejectsWrongSectionPathsAndMajorGroupMaterial(t *testing.T) {
+	t.Run("part A text path", func(t *testing.T) {
+		paper := english2StructureFixture()
+		paper.Questions[20].Points[2] = "Part B"
+		issues := strings.Join(English2StructureIssues(paper), " ")
+		if !strings.Contains(issues, "题位 21 必须属于阅读理解 Part A Text 1") {
+			t.Fatalf("wrong Part A path was accepted: %s", issues)
+		}
+	})
+
+	t.Run("translation path", func(t *testing.T) {
+		paper := english2StructureFixture()
+		paper.Questions[45].Points[1] = "写作"
+		issues := strings.Join(English2StructureIssues(paper), " ")
+		if !strings.Contains(issues, "题位 46 必须是翻译") {
+			t.Fatalf("wrong translation path was accepted: %s", issues)
+		}
+	})
+
+	t.Run("major questions cannot carry a group", func(t *testing.T) {
+		paper := english2StructureFixture()
+		paper.Questions[46].GroupID = "english2-reading-1"
+		paper.Questions[46].SharedMaterial = strings.Repeat("A shared passage with enough words. ", 60)
+		issues := strings.Join(English2StructureIssues(paper), " ")
+		if !strings.Contains(issues, "题位 47 属于翻译/写作，不应携带复合题组材料") {
+			t.Fatalf("major group material was accepted: %s", issues)
+		}
+	})
+}
+
+func english2StructureFixture() models.ExamPaper {
+	paper := models.ExamPaper{Subject: "英语二", TotalScore: 100}
+	cloze := strings.Repeat("A connected passage introduces a topic and then develops it with examples from everyday life. ", 24)
+	for number := 1; number <= 20; number++ {
+		cloze += fmt.Sprintf(" [%d]", number)
+	}
+	longArticle := strings.Repeat("Community learning helps residents exchange ideas and respond carefully to local needs. ", 24)
+	partBMaterial := longArticle + " Ramni Jannadass identifies the shortage of planting material as a major bottleneck. Christopher Kettle explains why infrastructure for collecting and storing seeds is essential. John Stanturf warns that fast-multiplying forest creatures can threaten restoration. Pedro Brancalion compares global restoration goals with the practical needs of local communities. Robin Chazdon stresses that restoration is about people as well as trees."
+	headings := []string{"Seed supply is a central bottleneck", "Infrastructure must support restoration", "Fast-multiplying threats require attention", "Local needs may differ from global goals", "People matter as much as trees", "Private funding solves every problem", "Restoration needs no local capacity"}
+	partBTargets := []string{"Ramni Jannadass", "Christopher Kettle", "John Stanturf", "Pedro Brancalion", "Robin Chazdon"}
+	for position := 1; position <= 48; position++ {
+		question := models.GeneratedQuestion{ID: fmt.Sprintf("q%d", position), Type: models.TypeChoice, Score: 2, Difficulty: 0.55, Status: "ready", Stem: "Choose the best answer.", Answer: "答案：A。根据材料可知，A 项符合中心意思。"}
+		switch {
+		case position <= 20:
+			question.Score = 0.5
+			question.GroupID, question.SharedMaterial = "english2-cloze", cloze
+			question.Points = []string{"english2", "完形填空", "语篇词汇与语境", fmt.Sprintf("题位%d", position)}
+			question.Options = []string{"take", "make", "keep", "find"}
+		case position <= 40:
+			textNumber := (position-21)/5 + 1
+			question.GroupID, question.SharedMaterial = fmt.Sprintf("english2-reading-%d", textNumber), longArticle
+			question.Points = []string{"english2", "阅读理解", "Part A", fmt.Sprintf("Text %d", textNumber), fmt.Sprintf("题位%d", position)}
+			question.Options = []string{"Choice A", "Choice B", "Choice C", "Choice D"}
+		case position <= 45:
+			question.GroupID, question.SharedMaterial = "english2-part-b", partBMaterial
+			question.Points = []string{"english2", "阅读理解", "Part B", "人物观点匹配", fmt.Sprintf("题位%d", position)}
+			question.Stem = partBTargets[position-41]
+			question.Options, question.SharedOptions = append([]string(nil), headings...), append([]string(nil), headings...)
+			question.Answer = fmt.Sprintf("答案：%c。该人物的观点明确支持对应陈述，结合共同材料中的具体表述，选项 %c 能准确概括其立场，其余选项与该人物观点不一致。", 'A'+rune(position-41), 'A'+rune(position-41))
+		case position == 46:
+			question.Type, question.Score = models.TypeMajor, 15
+			question.Points = []string{"english2", "翻译", "英译汉", "题位46"}
+			question.Stem = strings.Repeat("Careful discussion helps communities understand public choices and participate in decisions that shape their daily lives. ", 8)
+		case position == 47:
+			question.Type, question.Score = models.TypeMajor, 10
+			question.Points = []string{"english2", "写作", "应用文", "题位47"}
+			question.Stem = "Directions: Write an email to your friend and describe your experience."
+		case position == 48:
+			question.Type, question.Score = models.TypeMajor, 15
+			question.Points = []string{"english2", "写作", "图表作文", "题位48"}
+			question.Stem = "Directions: Write an essay based on the chart. The values are 55%, 42%, and 31%."
+		}
+		paper.Questions = append(paper.Questions, question)
+	}
+	return paper
+}
+
 func TestMissingCoverageMapsBackToSpecSlot(t *testing.T) {
 	bp := &orchestrator.Blueprint{
 		TotalScore:    10,
@@ -160,9 +286,9 @@ func TestValidateKeepsDefaultDifficultyAsSoftTarget(t *testing.T) {
 	}
 }
 
-func TestValidateRequiresCompleteRubrics(t *testing.T) {
+func TestValidateRequiresReferenceAnswers(t *testing.T) {
 	paper := models.ExamPaper{
-		Questions:  []models.GeneratedQuestion{{ID: "q1", Type: models.TypeMajor, Score: 10, Stem: "题面", Answer: "答案", Status: "ready"}},
+		Questions:  []models.GeneratedQuestion{{ID: "q1", Type: models.TypeMajor, Score: 10, Stem: "题面", Status: "ready"}},
 		TotalScore: 10,
 	}
 	result, err := New(nil).Validate(context.Background(), paper, nil)
@@ -170,10 +296,10 @@ func TestValidateRequiresCompleteRubrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.ContentReady {
-		t.Fatalf("paper without rubric passed content validation: %+v", result)
+		t.Fatalf("paper without a reference answer passed content validation: %+v", result)
 	}
 	if len(result.ContentIssues) == 0 {
-		t.Fatal("missing rubric was not reported")
+		t.Fatal("missing reference answer was not reported")
 	}
 }
 

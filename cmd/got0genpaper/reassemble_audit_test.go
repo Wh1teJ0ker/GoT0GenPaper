@@ -1,11 +1,11 @@
 package main
 
-// ReassembleAudit reassembles a persisted paper (output/live/paper.json)
-// through the current assembler + compiles the three deliverables. It exists
-// to reproduce live-run compile failures offline, without re-paying the LLM
-// cost. Skipped when the artifact is absent.
+// ReassembleAudit reassembles a persisted paper through the current assembler
+// and compiles the exam deliverable. It reproduces compile failures offline,
+// without calling an LLM. OUTPUT_AUDIT_DIR selects the artifact directory;
+// when unset it defaults to output/live.
 //
-//	go test ./cmd/got0genpaper -run TestReassembleAudit -v
+//	RUN_OUTPUT_AUDIT=1 OUTPUT_AUDIT_DIR=output go test ./cmd/got0genpaper -run TestReassembleAudit -v -count=1
 
 import (
 	"context"
@@ -22,8 +22,13 @@ func TestReassembleAudit(t *testing.T) {
 	if os.Getenv("RUN_OUTPUT_AUDIT") != "1" {
 		t.Skip("set RUN_OUTPUT_AUDIT=1 to audit persisted output/live artifacts")
 	}
-	liveDir := repoPath("output", "live")
-	data, err := os.ReadFile(filepath.Join(liveDir, "paper.json"))
+	auditDir := os.Getenv("OUTPUT_AUDIT_DIR")
+	if auditDir == "" {
+		auditDir = repoPath("output", "live")
+	} else if !filepath.IsAbs(auditDir) {
+		auditDir = repoPath(auditDir)
+	}
+	data, err := os.ReadFile(filepath.Join(auditDir, "paper.json"))
 	if err != nil {
 		t.Skip("no output/live/paper.json — run the live pipeline first")
 	}
@@ -32,31 +37,31 @@ func TestReassembleAudit(t *testing.T) {
 		t.Fatalf("paper.json: %v", err)
 	}
 
-	a := newTestAPI(t)
+	a := newTestApp(t)
 	a.ctx = context.Background()
-	out, err := a.AssemblePaper(paper)
+	out, err := a.assemblePaper(paper)
 	if err != nil {
 		t.Fatalf("assemble: %v", err)
 	}
-	_ = os.MkdirAll(liveDir, 0o755)
-	_ = os.WriteFile(filepath.Join(liveDir, "exam.tex"), []byte(out.ExamLaTeX), 0o644)
-	_ = os.WriteFile(filepath.Join(liveDir, "answers.tex"), []byte(out.AnswerLaTeX), 0o644)
-	_ = os.WriteFile(filepath.Join(liveDir, "answer_sheet.tex"), []byte(out.AnswerSheetTeX), 0o644)
+	if err := os.MkdirAll(auditDir, 0o755); err != nil {
+		t.Fatalf("create audit dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(auditDir, "exam.tex"), []byte(out.ExamLaTeX), 0o644); err != nil {
+		t.Fatalf("write exam.tex: %v", err)
+	}
 
 	engine, err := latex.FindEngine()
 	if err != nil {
 		t.Skip("no TeX engine:", err)
 	}
-	for _, name := range []string{"exam.tex", "answers.tex", "answer_sheet.tex"} {
-		res, cerr := latex.CompileTex(a.ctx, engine, filepath.Join(liveDir, name))
-		if cerr != nil {
-			logTail := ""
-			if res != nil {
-				logTail = res.Log
-			}
-			t.Errorf("编译 %s: %v\n%s", name, cerr, logTail)
-			continue
+	res, cerr := latex.CompileTex(a.ctx, engine, filepath.Join(auditDir, "exam.tex"))
+	if cerr != nil {
+		logTail := ""
+		if res != nil {
+			logTail = res.Log
 		}
-		t.Logf("✓ %s → %s", name, res.PDF)
+		t.Errorf("编译 exam.tex: %v\n%s", cerr, logTail)
+	} else {
+		t.Logf("✓ exam.tex → %s", res.PDF)
 	}
 }

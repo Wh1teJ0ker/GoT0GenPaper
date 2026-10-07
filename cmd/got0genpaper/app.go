@@ -1,14 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"image"
-	"image/color"
-	"image/png"
 	"log"
 	"os"
 	"path/filepath"
@@ -19,22 +14,18 @@ import (
 	"GoT0GenPaper/internal/latex"
 	"GoT0GenPaper/internal/llm"
 	"GoT0GenPaper/internal/models"
-	"GoT0GenPaper/internal/pipeline/answer"
 	"GoT0GenPaper/internal/pipeline/assembler"
 	"GoT0GenPaper/internal/pipeline/generator"
 	"GoT0GenPaper/internal/pipeline/gnn"
-	"GoT0GenPaper/internal/pipeline/grader"
 	"GoT0GenPaper/internal/pipeline/orchestrator"
 	"GoT0GenPaper/internal/pipeline/parser"
+	"GoT0GenPaper/internal/pipeline/quality"
 	"GoT0GenPaper/internal/pipeline/validator"
 	"GoT0GenPaper/internal/storage"
 )
 
-// API is the application service used by the CLI.
-// Each method maps to a pipeline stage or a project-management operation.
-// Cross-stage state is kept here and persisted after every stage, so the UI
-// can drive stages one at a time or run the whole pipeline end-to-end.
-type API struct {
+// app owns CLI-facing configuration, pipeline state, and generation services.
+type app struct {
 	ctx context.Context
 
 	cfg        *config.Config
@@ -46,10 +37,8 @@ type API struct {
 	gnnPred   *gnn.StatisticalPredictor
 	orch      *orchestrator.Orchestrator
 	gen       *generator.Generator
-	ans       *answer.AnswerService
 	validator *validator.Validator
 	assembler *assembler.Assembler
-	grader    *grader.Grader
 
 	// Cross-stage state (persisted to the data dir after each stage).
 	lastParse     *parser.ParseResult
@@ -57,21 +46,21 @@ type API struct {
 	lastSpec      *models.SpecTable
 }
 
-// NewAPI creates the application service, loading config.toml when present.
-func NewAPI() *API {
+// newApp creates the application service, loading config.toml when present.
+func newApp() *app {
 	cfg, err := config.Load(config.ConfigPath())
 	if err != nil {
 		log.Printf("config load failed, using defaults: %v", err)
 		cfg = config.Default()
 	}
-	a := &API{cfg: cfg, ctx: context.Background()}
+	a := &app{cfg: cfg, ctx: context.Background()}
 	a.rewire()
 	return a
 }
 
 // rewire (re)creates the LLM client and all pipeline stages from cfg.
-// Called at startup and whenever the config is updated.
-func (a *API) rewire() {
+// Called during application startup.
+func (a *app) rewire() {
 	a.cfg.Normalize()
 	config.ResolvePaths(a.cfg, filepath.Dir(config.ConfigPath()))
 	if err := latex.SetTemplateDir(a.cfg.Paths.Templates); err != nil {
@@ -104,34 +93,22 @@ func (a *API) rewire() {
 	}
 	// Cross-family fallback for flaky channels (truncation, upstream blips).
 	if provider != nil {
-		if fb := provider.JudgeModel; fb != "" && fb != a.gen.DefaultModel {
+		if fb := provider.FallbackModel; fb != "" && fb != a.gen.DefaultModel {
 			a.gen.FallbackModel = fb
 		}
 	}
 
-	modelMajor, modelJudge := "", ""
-	if provider != nil {
-		modelMajor = provider.ModelByType["major"]
-		modelJudge = provider.JudgeModel
-	}
-	a.ans = answer.New(a.llmC, modelMajor, modelJudge, modelJudge)
-
 	a.validator = validator.New(nil)
 	a.assembler = assembler.New()
-	graderModel := ""
-	if provider != nil {
-		graderModel = provider.JudgeModel
-	}
-	a.grader = grader.New(a.llmC, graderModel)
 }
 
 // --- Stage [1]: 真题解析 ---
 
-// ParseExams runs the real-exam parser on a source path.
+// parseExams runs the real-exam parser on a source path.
 // Results are persisted to data/parse_result.json and propagated downstream:
 // candidate pool for CP-SAT, dedup baseline for the validator, few-shot
 // examples and templates for the generator.
-func (a *API) ParseExams(source string) (*parser.ParseResult, error) {
+func (a *app) parseExams(source string) (*parser.ParseResult, error) {
 	if err := a.storageReady(); err != nil {
 		return nil, err
 	}
@@ -147,7 +124,7 @@ func (a *API) ParseExams(source string) (*parser.ParseResult, error) {
 }
 
 // attachParseArtifacts propagates parse output to downstream stages + storage.
-func (a *API) attachParseArtifacts(res *parser.ParseResult) error {
+func (a *app) attachParseArtifacts(res *parser.ParseResult) error {
 	if res == nil {
 		return nil
 	}
@@ -177,7 +154,7 @@ func (a *API) attachParseArtifacts(res *parser.ParseResult) error {
 }
 
 // loadStoredParse reloads the persisted parse result into state.
-func (a *API) loadStoredParse() error {
+func (a *app) loadStoredParse() error {
 	if err := a.storageReady(); err != nil {
 		return err
 	}
@@ -189,14 +166,6 @@ func (a *API) loadStoredParse() error {
 	return a.attachParseArtifacts(&r)
 }
 
-// LoadStoredParse reloads data/parse_result.json into live state and returns it.
-func (a *API) LoadStoredParse() (*parser.ParseResult, error) {
-	if err := a.loadStoredParse(); err != nil {
-		return nil, err
-	}
-	return a.lastParse, nil
-}
-
 // --- Stage [2]: GNN 预测 ---
 
 // PredictOutput bundles both GNN predictions.
@@ -206,9 +175,9 @@ type PredictOutput struct {
 	NumPoints    int                           `json:"numPoints"`
 }
 
-// PredictWeights runs Stage 2 and wires the priors into the orchestrator.
+// predictWeights runs Stage 2 and wires the priors into the orchestrator.
 // When qs is empty, the previously parsed questions are used.
-func (a *API) PredictWeights(qs []models.PastQuestion) (*PredictOutput, error) {
+func (a *app) predictWeights(qs []models.PastQuestion) (*PredictOutput, error) {
 	if err := a.storageReady(); err != nil {
 		return nil, err
 	}
@@ -224,7 +193,7 @@ func (a *API) PredictWeights(qs []models.PastQuestion) (*PredictOutput, error) {
 	if err != nil {
 		return nil, fmt.Errorf("predict cooccurrence: %w", err)
 	}
-	// Wire priors into CP-SAT so ComposeExam uses them.
+	// Wire priors into CP-SAT so composeExam uses them.
 	a.orch.GNNWeights = weights
 	a.orch.GNNCooccurrence = coocc
 	if a.store != nil {
@@ -240,15 +209,25 @@ func (a *API) PredictWeights(qs []models.PastQuestion) (*PredictOutput, error) {
 
 // --- Stage [3]: CP-SAT 编排 ---
 
-// ComposeExam runs CP-SAT to produce the spec table (生成前双向细目表).
+// composeExam runs CP-SAT to produce the spec table (生成前双向细目表).
 // When candidates is empty, the previously parsed questions are used.
 // The blueprint and spec table are persisted and kept for validation/repair.
-func (a *API) ComposeExam(bp orchestrator.Blueprint, candidates []models.PastQuestion) (*models.SpecTable, error) {
+func (a *app) composeExam(bp orchestrator.Blueprint, candidates []models.PastQuestion) (*models.SpecTable, error) {
 	if err := a.storageReady(); err != nil {
 		return nil, err
 	}
-	if len(candidates) == 0 && a.lastParse != nil {
+	useCachedCandidates := len(candidates) == 0 && a.lastParse != nil
+	if useCachedCandidates {
 		candidates = a.lastParse.Questions
+	}
+	if subject, ok := subjectProfile(bp.Subject); ok && (subject.Key == "math2" || subject.Key == "politics") {
+		candidates = quality.FilterPastQuestions(subject.Key, candidates)
+		if useCachedCandidates {
+			a.lastParse.Questions = append([]models.PastQuestion(nil), candidates...)
+			if err := a.attachParseArtifacts(a.lastParse); err != nil {
+				return nil, fmt.Errorf("stage3 subject filter: %w", err)
+			}
+		}
 	}
 	spec, err := a.orch.Compose(a.ctx, &bp, candidates)
 	if err != nil {
@@ -267,39 +246,10 @@ func (a *API) ComposeExam(bp orchestrator.Blueprint, candidates []models.PastQue
 	return spec, nil
 }
 
-// DefaultBlueprint keeps the existing service contract and returns the
-// 408 profile for callers that do not specify a subject.
-func (a *API) DefaultBlueprint() orchestrator.Blueprint {
-	bp, err := blueprintForSubject("408")
-	if err != nil {
-		// The static profile above makes this unreachable; retain a safe zero
-		// value rather than changing the no-error Wails method signature.
-		return orchestrator.Blueprint{}
-	}
-	return bp
-}
-
-// BlueprintForSubject returns the default blueprint for one selectable subject.
-func (a *API) BlueprintForSubject(subject string) (orchestrator.Blueprint, error) {
-	return blueprintForSubject(subject)
-}
-
-// BlueprintForSubjectWithDifficulty returns a subject blueprint with an
-// optional named preset or explicit easy,medium,hard histogram override.
-func (a *API) BlueprintForSubjectWithDifficulty(subject, preset, histogram string) (orchestrator.Blueprint, error) {
-	return blueprintForSubjectConfigured(subject, preset, histogram)
-}
-
-// BlueprintForSubjectWithDifficultyConfig exposes both ratio and exact-count
-// difficulty controls to non-CLI callers.
-func (a *API) BlueprintForSubjectWithDifficultyConfig(subject, preset, histogram, counts string) (orchestrator.Blueprint, error) {
-	return blueprintForSubjectDifficulty(subject, preset, histogram, counts)
-}
-
 // --- Stage [4]: 逐题生成 ---
 
-// GenerateQuestions runs the LLM generator on a spec table.
-func (a *API) GenerateQuestions(spec models.SpecTable) ([]models.GeneratedQuestion, error) {
+// generateQuestions runs the LLM generator on a spec table.
+func (a *app) generateQuestions(spec models.SpecTable) ([]models.GeneratedQuestion, error) {
 	if err := a.storageReady(); err != nil {
 		return nil, err
 	}
@@ -315,45 +265,11 @@ func (a *API) GenerateQuestions(spec models.SpecTable) ([]models.GeneratedQuesti
 	return qs, nil
 }
 
-// --- Stage [5]: 标准答案 ---
+// --- Whole-paper validation ---
 
-// ProduceAnswers runs the dual-agent + review + SymPy pipeline on questions.
-func (a *API) ProduceAnswers(qs []models.GeneratedQuestion) ([]*answer.ReviewResult, error) {
-	if err := a.storageReady(); err != nil {
-		return nil, err
-	}
-	var results []*answer.ReviewResult
-	for i, q := range qs {
-		r, err := a.ans.ProduceAnswer(a.ctx, q)
-		if err != nil {
-			return nil, err
-		}
-		degraded := 0
-		for _, v := range r.Verdicts {
-			if strings.Contains(v.Note, "fallback") || strings.Contains(v.Note, "failed") || strings.Contains(v.Note, "人工") || strings.Contains(v.Note, "审核") {
-				degraded++
-			}
-		}
-		if degraded > 0 {
-			fmt.Printf("[answer %d/%d] %s ⚠ 降级: %d/%d 检查点无 LLM 评分\n", i+1, len(qs), q.Type, degraded, len(r.Verdicts))
-		} else {
-			fmt.Printf("[answer %d/%d] %s 检查点%d个\n", i+1, len(qs), q.Type, len(r.Verdicts))
-		}
-		results = append(results, r)
-	}
-	if a.store != nil {
-		if err := a.store.SaveDataJSON("review_results", results); err != nil {
-			return nil, fmt.Errorf("save review results: %w", err)
-		}
-	}
-	return results, nil
-}
-
-// --- Stage [6]: 整卷校验 ---
-
-// ValidatePaper runs whole-paper checks (coverage/difficulty/dedup/score).
+// validatePaper runs whole-paper checks (coverage/difficulty/dedup/score).
 // When bp is nil, the last composed blueprint is used.
-func (a *API) ValidatePaper(paper models.ExamPaper, bp *orchestrator.Blueprint) (*validator.ValidationResult, error) {
+func (a *app) validatePaper(paper models.ExamPaper, bp *orchestrator.Blueprint) (*validator.ValidationResult, error) {
 	if bp == nil {
 		bp = a.lastBlueprint
 	}
@@ -367,9 +283,9 @@ type RepairOutput struct {
 	Validation *validator.ValidationResult `json:"validation"`
 }
 
-// RepairPaper runs the repair protocol: regenerate only violated题位,
+// repairExamPaper runs the repair protocol: regenerate only violated题位,
 // ≤ maxRounds rounds, then degrade (return last state + final validation).
-func (a *API) RepairPaper(paper models.ExamPaper, maxRounds int) (*RepairOutput, error) {
+func (a *app) repairExamPaper(paper models.ExamPaper, maxRounds int) (*RepairOutput, error) {
 	p, val, rounds, err := a.repairPaper(a.ctx, paper, a.lastBlueprint, maxRounds)
 	if err != nil {
 		return nil, err
@@ -377,14 +293,19 @@ func (a *API) RepairPaper(paper models.ExamPaper, maxRounds int) (*RepairOutput,
 	return &RepairOutput{Paper: p, Rounds: rounds, Validation: val}, nil
 }
 
-// RepairStoredPaper repairs selected entries in the existing assembled paper.
+// repairStoredPaper repairs selected entries in the existing assembled paper.
 // It intentionally skips parsing, composition, and regeneration of untouched
 // questions so a small fix does not invalidate a whole paper.
-func (a *API) RepairStoredPaper(specIDs []string) (*RepairOutput, error) {
+func (a *app) repairStoredPaper(specIDs []string) (*RepairOutput, error) {
 	if err := a.storageReady(); err != nil {
 		return nil, err
 	}
-	paper, err := a.LoadStoredPaper()
+	if a.lastParse == nil {
+		if err := a.loadStoredParse(); err != nil {
+			return nil, fmt.Errorf("读取历年真题语料以进行去重校验: %w", err)
+		}
+	}
+	paper, err := a.loadStoredPaper()
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +333,7 @@ func (a *API) RepairStoredPaper(specIDs []string) (*RepairOutput, error) {
 	if err := a.store.SaveDataJSON("generated_questions", paper.Questions); err != nil {
 		return nil, fmt.Errorf("同步 generated_questions: %w", err)
 	}
-	if _, err := a.AssemblePaper(*paper); err != nil {
+	if _, err := a.assemblePaper(*paper); err != nil {
 		return nil, err
 	}
 	return &RepairOutput{Paper: *paper, Rounds: 1, Validation: val}, nil
@@ -420,10 +341,8 @@ func (a *API) RepairStoredPaper(specIDs []string) (*RepairOutput, error) {
 
 // --- Stage [7]: 装配 ---
 
-// AssemblePaper produces the final LaTeX exam + answer + answer sheet +
-// spec table and persists them to the output dir (exam.tex / answers.tex /
-// answer_sheet.tex / spec_table.md / paper.json).
-func (a *API) AssemblePaper(paper models.ExamPaper) (*assembler.AssembleOutput, error) {
+// assemblePaper persists the printable exam and its structured validation data.
+func (a *app) assemblePaper(paper models.ExamPaper) (*assembler.AssembleOutput, error) {
 	if err := a.storageReady(); err != nil {
 		return nil, err
 	}
@@ -437,9 +356,6 @@ func (a *API) AssemblePaper(paper models.ExamPaper) (*assembler.AssembleOutput, 
 			content string
 		}{
 			{"exam.tex", out.ExamLaTeX},
-			{"answers.tex", out.AnswerLaTeX},
-			{"answer_sheet.tex", out.AnswerSheetTeX},
-			{"spec_table.md", out.SpecTable},
 		}
 		for _, file := range files {
 			if err := a.store.SaveOutputText(file.name, file.content); err != nil {
@@ -466,9 +382,8 @@ type CompileStatus struct {
 	Error       string                `json:"error,omitempty"`
 }
 
-// CompilePaperPDF compiles the assembled LaTeX deliverables (试卷/答案/答题卡)
-// in the output dir into PDFs. Requires xelatex or tectonic on PATH.
-func (a *API) CompilePaperPDF() ([]CompileStatus, error) {
+// compilePaperPDF compiles the assembled exam into a PDF.
+func (a *app) compilePaperPDF() ([]CompileStatus, error) {
 	if a.store == nil {
 		return nil, fmt.Errorf("storage unavailable")
 	}
@@ -491,7 +406,7 @@ func (a *API) CompilePaperPDF() ([]CompileStatus, error) {
 		return nil, err
 	}
 	var statuses []CompileStatus
-	for _, name := range []string{"exam.tex", "answers.tex", "answer_sheet.tex"} {
+	for _, name := range []string{"exam.tex"} {
 		texPath := filepath.Join(a.store.OutputDir, name)
 		if _, err := os.Stat(texPath); err != nil {
 			statuses = append(statuses, CompileStatus{File: name, Error: "未找到, 请先装配"})
@@ -515,52 +430,10 @@ func (a *API) CompilePaperPDF() ([]CompileStatus, error) {
 	return statuses, nil
 }
 
-// --- Stage [8]: 批改 ---
+// --- Artifacts ---
 
-// GradeAnswers grades student submissions against the paper's rubrics.
-func (a *API) GradeAnswers(reqs []grader.GradeRequest, rubrics []models.Rubric) ([]grader.GradeResult, error) {
-	if a.grader == nil {
-		a.grader = grader.New(nil, "")
-	}
-	return a.grader.GradeAll(a.ctx, reqs, rubrics)
-}
-
-// --- State / artifacts ---
-
-// StateSummary reports cross-stage progress so the UI can resume after restart.
-type StateSummary struct {
-	HasParse     bool     `json:"hasParse"`
-	ParseCount   int      `json:"parseCount"`
-	HasBlueprint bool     `json:"hasBlueprint"`
-	HasSpec      bool     `json:"hasSpec"`
-	SpecCount    int      `json:"specCount"`
-	OutputFiles  []string `json:"outputFiles"`
-}
-
-// GetState summarises the current cross-stage state.
-func (a *API) GetState() StateSummary {
-	s := StateSummary{}
-	if a.lastParse != nil {
-		s.HasParse = true
-		s.ParseCount = len(a.lastParse.Questions)
-	}
-	if a.lastBlueprint != nil {
-		s.HasBlueprint = true
-	}
-	if a.lastSpec != nil {
-		s.HasSpec = true
-		s.SpecCount = len(a.lastSpec.Entries)
-	}
-	if a.store != nil {
-		if files, err := a.store.ListDir(a.store.OutputDir); err == nil {
-			s.OutputFiles = files
-		}
-	}
-	return s
-}
-
-// ListArtifacts returns file names in the data and output directories.
-func (a *API) ListArtifacts() (map[string][]string, error) {
+// listArtifacts returns file names in the data and output directories.
+func (a *app) listArtifacts() (map[string][]string, error) {
 	out := make(map[string][]string)
 	if a.store == nil {
 		return out, nil
@@ -574,8 +447,8 @@ func (a *API) ListArtifacts() (map[string][]string, error) {
 	return out, nil
 }
 
-// LoadStoredPaper loads the last assembled paper from output/paper.json.
-func (a *API) LoadStoredPaper() (*models.ExamPaper, error) {
+// loadStoredPaper loads the last assembled paper from output/paper.json.
+func (a *app) loadStoredPaper() (*models.ExamPaper, error) {
 	if a.store == nil {
 		return nil, fmt.Errorf("storage unavailable")
 	}
@@ -586,42 +459,15 @@ func (a *API) LoadStoredPaper() (*models.ExamPaper, error) {
 	return &p, nil
 }
 
-// --- Config management ---
-
-// SaveConfig persists the current config to config.toml.
-func (a *API) SaveConfig() error {
-	return a.cfg.Save(config.ConfigPath())
-}
-
-// UpdateConfig replaces the config, persists it, and rewires all LLM-backed
-// stages. Cross-stage state (parse results, spec table) is preserved and
-// re-attached to the new stages.
-func (a *API) UpdateConfig(cfg *config.Config) (*config.Config, error) {
-	if cfg == nil {
-		return a.cfg, nil
-	}
-	cfg.Normalize()
-	a.cfg = cfg
-	a.rewire()
-	if err := a.cfg.Save(config.ConfigPath()); err != nil {
-		return a.cfg, fmt.Errorf("rewired but save failed: %w", err)
-	}
-	if err := a.attachParseArtifacts(a.lastParse); err != nil {
-		return a.cfg, err
-	}
-	return a.cfg, nil
-}
-
 // ProviderConnectionRequest contains only the values needed for a one-off
-// connection check. It is deliberately separate from Config so users can
-// test unsaved edits without changing the running pipeline.
+// connection check. CLI overrides can be tested without changing the config.
 type ProviderConnectionRequest struct {
 	BaseURL string `json:"baseUrl"`
 	APIKey  string `json:"apiKey"`
 	Model   string `json:"model"`
 }
 
-// ConnectionTestResult is safe to show in the settings page: it never
+// ConnectionTestResult is safe to print in CLI output: it never
 // contains the submitted API key or the full upstream response body.
 type ConnectionTestResult struct {
 	OK           bool   `json:"ok"`
@@ -631,21 +477,13 @@ type ConnectionTestResult struct {
 	LatencyMs    int64  `json:"latencyMs"`
 }
 
-// TestProviderConnection sends a tiny real request to an OpenAI-compatible
-// endpoint with a short timeout. A nil API context is valid in unit tests and
-// during early app startup, so use Background in that case.
-func (a *API) TestProviderConnection(req ProviderConnectionRequest) (result ConnectionTestResult) {
-	return a.testProvider(req, false)
+// testProviderConnection sends a tiny request with a short timeout. A nil
+// application context is valid in unit tests and uses Background instead.
+func (a *app) testProviderConnection(req ProviderConnectionRequest) (result ConnectionTestResult) {
+	return a.testProvider(req)
 }
 
-// TestProviderVisionConnection sends a tiny PNG as an image_url part. It
-// verifies the provider accepts multimodal input without requiring Tesseract
-// or any local OCR engine.
-func (a *API) TestProviderVisionConnection(req ProviderConnectionRequest) (result ConnectionTestResult) {
-	return a.testProvider(req, true)
-}
-
-func (a *API) testProvider(req ProviderConnectionRequest, vision bool) (result ConnectionTestResult) {
+func (a *app) testProvider(req ProviderConnectionRequest) (result ConnectionTestResult) {
 	started := time.Now()
 	result = ConnectionTestResult{Model: strings.TrimSpace(req.Model)}
 	defer func() { result.LatencyMs = time.Since(started).Milliseconds() }()
@@ -666,51 +504,15 @@ func (a *API) testProvider(req ProviderConnectionRequest, vision bool) (result C
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	var messages []llm.Message
-	if vision {
-		imageURL, imageErr := connectionProbeImageURL()
-		if imageErr != nil {
-			result.Message = "生成多模态测试图片失败: " + imageErr.Error()
-			return result
-		}
-		messages = []llm.Message{{Role: "user", Content: []llm.ContentPart{
-			{Type: "text", Text: "请读取附图。图中是一个黑色方块，请只回复 OK。"},
-			{Type: "image_url", ImageURL: &llm.ImageURL{URL: imageURL, Detail: "low"}},
-		}}}
-	} else {
-		messages = []llm.Message{{Role: "user", Content: "请只回复 OK"}}
-	}
+	messages := []llm.Message{{Role: "user", Content: "请只回复 OK"}}
 	_, err := llm.New(baseURL, req.APIKey).Chat(ctx, result.Model, messages, llm.ChatOptions{MaxTokens: 8, DisableRetries: true})
 	if err == nil {
 		result.OK = true
-		if vision {
-			result.Message = "多模态连接成功"
-		} else {
-			result.Message = "连接成功"
-		}
+		result.Message = "连接成功"
 		return result
 	}
 	result.Message = connectionErrorMessage(err)
 	return result
-}
-
-func connectionProbeImageURL() (string, error) {
-	imageData := image.NewRGBA(image.Rect(0, 0, 16, 16))
-	for y := 0; y < 16; y++ {
-		for x := 0; x < 16; x++ {
-			imageData.Set(x, y, color.White)
-		}
-	}
-	for y := 4; y < 12; y++ {
-		for x := 4; x < 12; x++ {
-			imageData.Set(x, y, color.Black)
-		}
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, imageData); err != nil {
-		return "", err
-	}
-	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
 func connectionErrorMessage(err error) string {
@@ -745,7 +547,7 @@ func connectionErrorMessage(err error) string {
 }
 
 func sanitizeConnectionError(message string) string {
-	// Keep the UI useful without displaying a provider response that may
+	// Keep diagnostics useful without displaying a provider response that may
 	// contain request metadata or credentials.
 	if len(message) > 180 {
 		message = message[:180] + "…"
@@ -755,12 +557,7 @@ func sanitizeConnectionError(message string) string {
 
 // --- Project management / health ---
 
-// GetConfig returns the current runtime config.
-func (a *API) GetConfig() *config.Config {
-	return a.cfg
-}
-
-func (a *API) storageReady() error {
+func (a *app) storageReady() error {
 	if a == nil || a.store == nil {
 		return fmt.Errorf("本地存储未初始化")
 	}
@@ -781,8 +578,8 @@ type HealthStatus struct {
 	LLMConfigReason string `json:"llmConfigReason,omitempty"`
 }
 
-// HealthCheck verifies backend readiness.
-func (a *API) HealthCheck() HealthStatus {
+// healthCheck verifies backend readiness.
+func (a *app) healthCheck() HealthStatus {
 	status := HealthStatus{
 		LLM: a != nil && a.llmC != nil,
 	}

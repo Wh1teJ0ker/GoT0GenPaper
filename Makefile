@@ -25,7 +25,7 @@ help:
 	@echo 'make selftest   Check local runtime and data dependencies'
 	@echo 'make generate SUBJECT="数学二" DIFFICULTY=hard  Generate a paper (uses the configured LLM)'
 	@echo 'make generate SUBJECT="数学二" DIFFICULTY_COUNTS=2,10,10  Use exact difficulty counts'
-	@echo 'make pdf        Compile output/*.tex into PDFs'
+	@echo 'make pdf        Compile output/exam.tex into exam.pdf'
 	@echo 'make version    Print the local binary version'
 
 test:

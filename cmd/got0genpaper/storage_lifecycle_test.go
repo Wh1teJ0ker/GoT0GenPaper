@@ -9,7 +9,7 @@ import (
 // TestStorageRoundTrip covers the untested persistence layer: JSON save/load
 // for data artifacts, text outputs, and directory listing.
 func TestStorageRoundTrip(t *testing.T) {
-	a := newTestAPI(t)
+	a := newTestApp(t)
 
 	type payload struct {
 		Name string `json:"name"`

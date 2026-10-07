@@ -5,9 +5,8 @@ package main
 //	LIVE_LLM=1 go test ./cmd/got0genpaper -run TestLiveFullPipeline -v
 //
 // Requires config.toml pointed at a reachable gateway (base_url + api_key).
-// Drives the same stage calls as RunPipeline with per-stage attribution:
-// parse(annotate) → gnn → compose → generate×N → answer×N → validate/repair
-// → assemble → compile PDF, then probes the output quality.
+// Drives the generation stages with per-stage attribution, then probes the
+// generated paper and compiles its single PDF deliverable.
 
 import (
 	"context"
@@ -31,7 +30,7 @@ func TestLiveFullPipeline(t *testing.T) {
 		source = repoPath("data", "exams", "csgraduates", "408", "2024.md")
 	}
 
-	a := newTestAPI(t) // temp workspace; newTestAPI forces a dead LLM URL
+	a := newTestApp(t) // temp workspace; newTestApp forces a dead LLM URL
 	// Re-apply the REAL gateway config (keep the temp workspace paths).
 	liveCfg, err := config.Load(config.ConfigPath())
 	if err != nil {
@@ -48,21 +47,24 @@ func TestLiveFullPipeline(t *testing.T) {
 	}
 
 	stage("Stage 1 解析+标注")
-	if _, err := a.ParseExams(source); err != nil {
+	if _, err := a.parseExams(source); err != nil {
 		t.Fatalf("解析: %v", err)
 	}
 	t.Logf("解析完成: %d 题", len(a.lastParse.Questions))
 
 	stage("Stage 2 GNN")
-	if _, err := a.PredictWeights(nil); err != nil {
+	if _, err := a.predictWeights(nil); err != nil {
 		t.Fatalf("GNN: %v", err)
 	}
 
 	stage("Stage 3 CP-SAT")
-	bp := a.DefaultBlueprint()
+	bp, err := blueprintForSubject("408")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if os.Getenv("LIVE_BLUEPRINT") == "small" {
 		// Reduced-but-complete composition: 10×2 choice + 1×10 major.
-		// The gateway is slow (~40s/generate, ~80s/answer-question); a full
+		// The gateway is slow (~40s/generate); a full
 		// 150-point paper needs ~2h, which exceeds any sane test timeout.
 		bp = orchestrator.Blueprint{
 			Subject:    "408",
@@ -78,8 +80,7 @@ func TestLiveFullPipeline(t *testing.T) {
 			NumQuestions: 11,
 		}
 	} else if os.Getenv("LIVE_BLUEPRINT") == "tiny" {
-		// Fast smoke run: enough to exercise generation, answer/rubric,
-		// validation and assembly without waiting for a full paper.
+		// Fast smoke run: enough to exercise generation, validation and assembly.
 		bp = orchestrator.Blueprint{
 			Subject:    "408",
 			TotalScore: 4,
@@ -92,26 +93,20 @@ func TestLiveFullPipeline(t *testing.T) {
 			NumQuestions: 2,
 		}
 	}
-	spec, err := a.ComposeExam(bp, nil)
+	spec, err := a.composeExam(bp, nil)
 	if err != nil {
 		t.Fatalf("编排: %v", err)
 	}
 	t.Logf("编排: %d 题位 总分 %.0f", len(spec.Entries), spec.TotalScore)
 
 	stage("Stage 4 逐题生成")
-	qs, err := a.GenerateQuestions(*spec)
+	qs, err := a.generateQuestions(*spec)
 	if err != nil {
 		t.Fatalf("生成: %v", err)
 	}
 
-	stage("Stage 5 标准答案")
-	reviews, err := a.ProduceAnswers(qs)
-	if err != nil {
-		t.Fatalf("答案: %v", err)
-	}
-
-	stage("Stage 6 校验+修复")
-	paper := buildPaper(*spec, qs, reviews)
+	stage("Stage 5 校验+修复")
+	paper := buildPaper(*spec, qs)
 	paper.ID = fmt.Sprintf("paper_%d", time.Now().UnixMilli())
 	maxRepairRounds := 2
 	if raw := os.Getenv("LIVE_MAX_REPAIR_ROUNDS"); raw != "" {
@@ -119,7 +114,7 @@ func TestLiveFullPipeline(t *testing.T) {
 			t.Fatalf("LIVE_MAX_REPAIR_ROUNDS must be a non-negative integer, got %q", raw)
 		}
 	}
-	out, err := a.RepairPaper(paper, maxRepairRounds)
+	out, err := a.repairExamPaper(paper, maxRepairRounds)
 	if err != nil {
 		t.Fatalf("校验: %v", err)
 	}
@@ -130,8 +125,8 @@ func TestLiveFullPipeline(t *testing.T) {
 			v.ScoreTotalOK, v.ScoreActual, v.ScoreExpected, out.Rounds, len(v.ViolatedSpecIDs))
 	}
 
-	stage("Stage 7 装配")
-	if _, err := a.AssemblePaper(paper); err != nil {
+	stage("Stage 6 装配")
+	if _, err := a.assemblePaper(paper); err != nil {
 		t.Fatalf("装配: %v", err)
 	}
 	// Persist artifacts to the repo so they survive t.TempDir cleanup.
@@ -139,8 +134,6 @@ func TestLiveFullPipeline(t *testing.T) {
 	_ = os.MkdirAll(liveDir, 0o755)
 	for _, pair := range [][2]string{
 		{"exam.tex", a.store.OutputDir + "/exam.tex"},
-		{"answers.tex", a.store.OutputDir + "/answers.tex"},
-		{"answer_sheet.tex", a.store.OutputDir + "/answer_sheet.tex"},
 		{"paper.json", a.store.OutputDir + "/paper.json"},
 	} {
 		if data, err := os.ReadFile(pair[1]); err == nil {
@@ -165,16 +158,6 @@ func TestLiveFullPipeline(t *testing.T) {
 			zeroScore++
 		}
 	}
-	rubricZero := 0
-	for _, r := range paper.Rubrics {
-		sum := 0.0
-		for _, it := range r.Items {
-			sum += it.MaxScore
-		}
-		if sum == 0 {
-			rubricZero++
-		}
-	}
 	// Duplicate stems: identical prompts (same template key) can make the
 	// LLM emit the same question repeatedly.
 	seenStems := make(map[string]int)
@@ -187,8 +170,8 @@ func TestLiveFullPipeline(t *testing.T) {
 			dupStems += n - 1
 		}
 	}
-	t.Logf("质量: 空题面=%d 超短=%d 选项≠4=%d 零分值=%d 零rubric=%d 重复题面=%d",
-		empty, short, badOptions, zeroScore, rubricZero, dupStems)
+	t.Logf("质量: 空题面=%d 超短=%d 选项≠4=%d 零分值=%d 重复题面=%d",
+		empty, short, badOptions, zeroScore, dupStems)
 	if empty > 0 {
 		t.Errorf("%d 道题空题面 (LLM 生成失败未被替换)", empty)
 	}
@@ -202,16 +185,14 @@ func TestLiveFullPipeline(t *testing.T) {
 		t.Logf("样例[%d] (%s %.0f分): %.100s", i+1, q.Type, q.Score, q.Stem)
 	}
 
-	// PDF compile of the deliverables.
+	// Compile the sole PDF deliverable.
 	engine, err := latex.FindEngine()
 	if err == nil {
-		for _, name := range []string{"exam.tex", "answers.tex", "answer_sheet.tex"} {
-			res, cerr := latex.CompileTex(a.ctx, engine, a.store.OutputDir+"/"+name)
-			if cerr != nil {
-				t.Errorf("编译 %s: %v", name, cerr)
-				continue
-			}
-			t.Logf("✓ %s → %s (%s)", name, res.PDF, res.Duration)
+		res, cerr := latex.CompileTex(a.ctx, engine, a.store.OutputDir+"/exam.tex")
+		if cerr != nil {
+			t.Errorf("编译 exam.tex: %v", cerr)
+		} else {
+			t.Logf("✓ exam.tex → %s (%s)", res.PDF, res.Duration)
 		}
 	} else {
 		t.Logf("无 TeX 引擎, 跳过 PDF: %v", err)

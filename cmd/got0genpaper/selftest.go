@@ -107,22 +107,12 @@ func runSelfTest(args []string) error {
 		add("latex", "PDF 编译引擎", "pass", false, filepath.Base(engine))
 	}
 	if includeNetwork && provider != nil {
-		a := newCLIAPI()
-		result := a.TestProviderConnection(ProviderConnectionRequest{BaseURL: provider.BaseURL, APIKey: provider.APIKey, Model: provider.DefaultModel})
+		a := newCLIApp()
+		result := a.testProviderConnection(ProviderConnectionRequest{BaseURL: provider.BaseURL, APIKey: provider.APIKey, Model: provider.DefaultModel})
 		if result.OK {
 			add("provider-network", "供应商连接", "pass", true, fmt.Sprintf("%s，耗时 %d ms", result.Message, result.LatencyMs))
 		} else {
 			add("provider-network", "供应商连接", "fail", true, result.Message)
-		}
-		visionModel := provider.VisionModel
-		if visionModel == "" {
-			visionModel = provider.DefaultModel
-		}
-		visionResult := a.TestProviderVisionConnection(ProviderConnectionRequest{BaseURL: provider.BaseURL, APIKey: provider.APIKey, Model: visionModel})
-		if visionResult.OK {
-			add("provider-vision", "多模态供应商连接", "pass", true, fmt.Sprintf("%s，耗时 %d ms", visionResult.Message, visionResult.LatencyMs))
-		} else {
-			add("provider-vision", "多模态供应商连接", "fail", true, visionResult.Message)
 		}
 	}
 

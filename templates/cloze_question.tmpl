@@ -1,0 +1,4 @@
+{{%define "cloze_question"%}}\noindent\begin{tabularx}{\textwidth}{@{}>{\bfseries\raggedleft\arraybackslash}p{1.55em}@{\hspace{0.35em}}*{4}{>{\raggedright\arraybackslash}X}@{}}
+{{% .Number %}}．{{%range .Options%}} & {{% .Label %}}．{{% .Text %}}{{%end%}}\\[-0.05em]
+\end{tabularx}\par\vspace{0.2em}
+{{%end%}}

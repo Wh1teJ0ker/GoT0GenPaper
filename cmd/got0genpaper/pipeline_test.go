@@ -46,7 +46,6 @@ func smallBlueprint() orchestrator.Blueprint {
 
 func fixturePaper(spec models.SpecTable) models.ExamPaper {
 	questions := make([]models.GeneratedQuestion, 0, len(spec.Entries))
-	rubrics := make([]models.Rubric, 0, len(spec.Entries))
 	for _, entry := range spec.Entries {
 		q := models.GeneratedQuestion{
 			ID:         "gen_" + entry.ID,
@@ -60,18 +59,11 @@ func fixturePaper(spec models.SpecTable) models.ExamPaper {
 			Status:     "ready",
 		}
 		questions = append(questions, q)
-		rubrics = append(rubrics, models.Rubric{
-			ID:         "rubric_" + q.ID,
-			QuestionID: q.ID,
-			Items:      []models.RubricItem{{ID: "check_1", Description: "答案完整", MaxScore: q.Score}},
-			Version:    1,
-		})
 	}
 	return models.ExamPaper{
 		Subject:    spec.Subject,
 		Questions:  questions,
 		SpecTable:  spec,
-		Rubrics:    rubrics,
 		TotalScore: spec.TotalScore,
 	}
 }
@@ -163,7 +155,7 @@ func TestComposeBlueprintConformanceMath(t *testing.T) {
 }
 
 func TestScoreCheckUsesBlueprintTotal(t *testing.T) {
-	a := newTestAPI(t)
+	a := newTestApp(t)
 	blueprint := smallBlueprint()
 	spec, err := a.orch.Compose(t.Context(), &blueprint, fixtureCandidates())
 	if err != nil {
@@ -171,9 +163,9 @@ func TestScoreCheckUsesBlueprintTotal(t *testing.T) {
 	}
 	a.lastBlueprint = &blueprint
 	paper := fixturePaper(*spec)
-	val, err := a.ValidatePaper(paper, &blueprint)
+	val, err := a.validatePaper(paper, &blueprint)
 	if err != nil {
-		t.Fatalf("ValidatePaper: %v", err)
+		t.Fatalf("validatePaper: %v", err)
 	}
 	if !val.ScoreTotalOK || val.ScoreExpected != blueprint.TotalScore {
 		t.Errorf("full paper score check = %v/%.1f, want true/%.1f", val.ScoreTotalOK, val.ScoreExpected, blueprint.TotalScore)
@@ -182,9 +174,9 @@ func TestScoreCheckUsesBlueprintTotal(t *testing.T) {
 	short := paper
 	short.Questions = append([]models.GeneratedQuestion(nil), paper.Questions[1:]...)
 	short.TotalScore = paper.TotalScore - paper.Questions[0].Score
-	val, err = a.ValidatePaper(short, &blueprint)
+	val, err = a.validatePaper(short, &blueprint)
 	if err != nil {
-		t.Fatalf("ValidatePaper(short): %v", err)
+		t.Fatalf("validatePaper(short): %v", err)
 	}
 	if val.ScoreTotalOK || val.ScoreExpected != blueprint.TotalScore {
 		t.Errorf("short paper score check = %v/%.1f, want false/%.1f", val.ScoreTotalOK, val.ScoreExpected, blueprint.TotalScore)
@@ -193,14 +185,14 @@ func TestScoreCheckUsesBlueprintTotal(t *testing.T) {
 
 func TestBuildPaperDoesNotInventBlueprintScoreForZeroValueQuestions(t *testing.T) {
 	spec := models.SpecTable{Subject: "408", TotalScore: 10}
-	paper := buildPaper(spec, []models.GeneratedQuestion{{ID: "q1", SpecID: "spec-1"}}, nil)
+	paper := buildPaper(spec, []models.GeneratedQuestion{{ID: "q1", SpecID: "spec-1"}})
 	if paper.TotalScore != 0 {
 		t.Fatalf("paper total = %.1f, want actual zero-value sum", paper.TotalScore)
 	}
 }
 
 func TestRepairAddsMissingSpecSlot(t *testing.T) {
-	a := newTestAPI(t)
+	a := newTestApp(t)
 	blueprint := orchestrator.Blueprint{
 		Subject: "408", TotalScore: 10,
 		DiffHist:      map[models.DifficultyBand]float64{models.BandMedium: 1},
@@ -211,9 +203,9 @@ func TestRepairAddsMissingSpecSlot(t *testing.T) {
 		Subject:   "408",
 		SpecTable: models.SpecTable{Subject: "408", TotalScore: 10, Entries: []models.SpecEntry{{ID: "spec_001", Type: models.TypeMajor, Points: []string{"point-1"}, DiffBand: models.BandMedium, Score: 10}}},
 	}
-	out, err := a.RepairPaper(paper, 1)
+	out, err := a.repairExamPaper(paper, 1)
 	if err != nil {
-		t.Fatalf("RepairPaper: %v", err)
+		t.Fatalf("repairExamPaper: %v", err)
 	}
 	if len(out.Paper.Questions) != 1 || out.Paper.Questions[0].SpecID != "spec_001" {
 		t.Fatalf("missing spec slot was not inserted: %+v", out.Paper.Questions)
@@ -224,7 +216,7 @@ func TestRepairAddsMissingSpecSlot(t *testing.T) {
 }
 
 func TestRepairRegeneratesOnlyViolatedSlot(t *testing.T) {
-	a := newTestAPI(t)
+	a := newTestApp(t)
 	a.gen.LLM = nil // deterministic placeholder; this test does not call a provider
 	blueprint := smallBlueprint()
 	spec, err := a.orch.Compose(t.Context(), &blueprint, fixtureCandidates())
@@ -235,9 +227,9 @@ func TestRepairRegeneratesOnlyViolatedSlot(t *testing.T) {
 	paper := fixturePaper(*spec)
 	original := append([]models.GeneratedQuestion(nil), paper.Questions[1:]...)
 	paper.Questions[0].Difficulty = 0.95
-	out, err := a.RepairPaper(paper, 1)
+	out, err := a.repairExamPaper(paper, 1)
 	if err != nil {
-		t.Fatalf("RepairPaper: %v", err)
+		t.Fatalf("repairExamPaper: %v", err)
 	}
 	if out.Rounds != 1 || out.Validation == nil {
 		t.Fatalf("repair result = rounds %d validation %v, want one bounded round", out.Rounds, out.Validation)
