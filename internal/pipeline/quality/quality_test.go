@@ -22,6 +22,33 @@ func TestExplanationIssuesAcceptsReasonedChoiceAnswer(t *testing.T) {
 	}
 }
 
+func Test408RejectsModelAnswerThatRevisesTheQuestionMidExplanation(t *testing.T) {
+	q := models.GeneratedQuestion{
+		Type:    models.TypeChoice,
+		Points:  []string{"408", "操作系统", "地址翻译"},
+		Stem:    "根据地址空间和页大小计算虚页号位数，选择正确答案。",
+		Options: []string{"A. 20", "B. 32", "C. 12", "D. 10"},
+		Answer:  "答案：B。计算得到虚页号 30 位，原选项 B 有误，因此应当修正题面并重新设计选项。",
+	}
+	issues := Issues(q)
+	if len(issues) == 0 || !strings.Contains(strings.Join(issues, " "), "自我纠错") {
+		t.Fatalf("self-correcting answer was accepted: %v", issues)
+	}
+}
+
+func Test408RejectsSpeculationAboutMissingTopology(t *testing.T) {
+	q := models.GeneratedQuestion{
+		Type:   models.TypeMajor,
+		Points: []string{"408", "计算机网络", "路由协议"},
+		Stem:   "按给定拓扑计算 RIP 路由。",
+		Answer: "答案取决于具体的拓扑结构；假设题目意图为 R1 与 R3 相连。",
+	}
+	issues := Issues(q)
+	if len(issues) == 0 || !strings.Contains(strings.Join(issues, " "), "自我纠错") {
+		t.Fatalf("speculation about missing topology was accepted: %v", issues)
+	}
+}
+
 func TestChoiceConsistencyRejectsDerivedTraversalSequenceForAnotherOption(t *testing.T) {
 	q := models.GeneratedQuestion{
 		Type: models.TypeChoice,
@@ -92,6 +119,24 @@ func Test408QualityAllowsExplicitRecursionStackCycleDetection(t *testing.T) {
 	content := "在有向图 DFS 中，visited 标记顶点是否访问；结合递归栈识别回边，才能判断有向环。"
 	if issues := DataStructure408Issues(content); len(issues) != 0 {
 		t.Fatalf("cycle detection with recursion-stack state was rejected: %v", issues)
+	}
+}
+
+func Test408RejectsUnknownAndSyntheticKnowledgePoints(t *testing.T) {
+	for _, point := range []string{"unknown", "未知", "choice_auto_0"} {
+		if issues := SubjectContentIssues("408", []string{point}, "一个完整的计算机基础题面。"); len(issues) == 0 {
+			t.Errorf("invalid 408 point %q was accepted", point)
+		}
+	}
+	if issues := SubjectContentIssues("408", []string{"TCP"}, "一个完整的计算机基础题面。"); len(issues) == 0 {
+		t.Fatal("408 topic without a four-course discipline was accepted")
+	}
+}
+
+func Test408PastQuestionFilterDropsUnknownKnowledgePoints(t *testing.T) {
+	question := models.PastQuestion{Subject: "408", Type: models.TypeMajor, Points: []string{"unknown"}, Stem: "计算机系统题目", Answer: "合理参考答案"}
+	if PastQuestionInSubject("408", question) {
+		t.Fatal("past question with unknown 408 label was retained")
 	}
 }
 

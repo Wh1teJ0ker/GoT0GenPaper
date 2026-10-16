@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -244,7 +245,7 @@ func TestFixedCountTopUpUsesRealDisciplinePoints(t *testing.T) {
 
 func TestStrictDifficultyCandidatesKeepSyllabusBackedPoints(t *testing.T) {
 	used := make(map[string]bool)
-	points := nextSyntheticPointSet("math2", "高等数学", models.TypeChoice, used, 0)
+	points := nextSyntheticPointSet("math2", "高等数学", models.TypeChoice, 5, used, 0)
 	if len(points) == 0 {
 		t.Fatal("nextSyntheticPointSet returned no candidate")
 	}
@@ -274,6 +275,78 @@ func TestStrictDifficultyCandidatesKeepSyllabusBackedPoints(t *testing.T) {
 			t.Fatalf("difficulty augmentation duplicated a knowledge-point set: %v", candidate.Points)
 		}
 		seen[key] = true
+	}
+}
+
+// TestComposeEnglish2StrictBandsFromSingleBandCorpus mirrors the bundled
+// English II corpus: every historical item carries the same difficulty band
+// (offline parsing defaults to medium), while the blueprint demands an exact
+// easy/medium/hard histogram. Composition must top up each band without
+// breaking the fixed 48-position structure.
+func TestComposeEnglish2StrictBandsFromSingleBandCorpus(t *testing.T) {
+	candidates := make([]models.PastQuestion, 0, 68)
+	add := func(questionType models.QuestionType, score float64, points ...string) {
+		candidates = append(candidates, models.PastQuestion{
+			ID: fmt.Sprintf("past_%d", len(candidates)), Type: questionType,
+			Points: points, Score: score, Difficulty: 0.55,
+		})
+	}
+	for position := 1; position <= 20; position++ {
+		add(models.TypeChoice, 0.5, "english2", "完形填空", "语篇词汇与语境", fmt.Sprintf("题位%d", position))
+	}
+	for position := 21; position <= 40; position++ {
+		add(models.TypeChoice, 2, "english2", "阅读理解", "Part A", fmt.Sprintf("Text %d", (position-21)/5+1), fmt.Sprintf("题位%d", position))
+	}
+	for position := 41; position <= 45; position++ {
+		add(models.TypeChoice, 2, "english2", "阅读理解", "Part B", "人物观点匹配", fmt.Sprintf("题位%d", position))
+	}
+	add(models.TypeMajor, 15, "english2", "翻译", "英译汉")
+	add(models.TypeMajor, 10, "english2", "写作", "应用文")
+	add(models.TypeMajor, 15, "english2", "写作", "图表作文")
+
+	bp := &Blueprint{
+		Subject: "英语二", TotalScore: 100, NumQuestions: 48,
+		TypeQuota:             map[models.QuestionType]float64{models.TypeChoice: 60, models.TypeMajor: 40},
+		TypeCountQuota:        map[models.QuestionType]int{models.TypeChoice: 45, models.TypeMajor: 3},
+		DiffHist:              map[models.DifficultyBand]float64{models.BandEasy: 0.3, models.BandMedium: 0.5, models.BandHard: 0.2},
+		DiffCountQuota:        map[models.DifficultyBand]int{models.BandEasy: 14, models.BandMedium: 24, models.BandHard: 10},
+		DifficultyCountStrict: true,
+	}
+	spec, err := New(nil, nil).Compose(context.Background(), bp, candidates)
+	if err != nil {
+		t.Fatalf("compose english2 from single-band corpus: %v", err)
+	}
+	if len(spec.Entries) != 48 {
+		t.Fatalf("english2 spec has %d entries, want 48", len(spec.Entries))
+	}
+	bands := make(map[models.DifficultyBand]int)
+	for _, entry := range spec.Entries {
+		bands[entry.DiffBand]++
+	}
+	for band, want := range bp.DiffCountQuota {
+		if bands[band] != want {
+			t.Errorf("band %d count = %d, want %d (all=%v)", band, bands[band], want, bands)
+		}
+	}
+	for i, entry := range spec.Entries {
+		position := i + 1
+		wantType, wantScore := models.TypeChoice, 2.0
+		switch {
+		case position <= 20:
+			wantScore = 0.5
+		case position == 46:
+			wantType, wantScore = models.TypeMajor, 15
+		case position == 47:
+			wantType, wantScore = models.TypeMajor, 10
+		case position == 48:
+			wantType, wantScore = models.TypeMajor, 15
+		}
+		if entry.Type != wantType || math.Abs(entry.Score-wantScore) > 0.01 {
+			t.Errorf("position %d = %s %.2f, want %s %.2f", position, entry.Type, entry.Score, wantType, wantScore)
+		}
+		if got, ok := models.EnglishQuestionPosition(entry.Points); !ok || got != position {
+			t.Errorf("position %d carries 题位 %v (ok=%v)", position, got, ok)
+		}
 	}
 }
 
@@ -405,5 +478,63 @@ func TestComposeEnforcesDisciplineQuotasAndOrder(t *testing.T) {
 				t.Errorf("%s %s count = %d, want %d", discipline, questionType, counts[discipline][questionType], bp.DisciplineCountQuota[discipline][questionType])
 			}
 		}
+	}
+}
+
+func TestComposeEnforcesAndOrdersDisciplineScorePattern(t *testing.T) {
+	bp := &Blueprint{
+		Subject: "408", TotalScore: 23, NumQuestions: 2,
+		TypeQuota:              map[models.QuestionType]float64{models.TypeMajor: 23},
+		TypeCountQuota:         map[models.QuestionType]int{models.TypeMajor: 2},
+		DisciplineQuota:        map[string]map[models.QuestionType]float64{"数据结构": {models.TypeMajor: 23}},
+		DisciplineCountQuota:   map[string]map[models.QuestionType]int{"数据结构": {models.TypeMajor: 2}},
+		DisciplineOrder:        []string{"数据结构"},
+		DisciplineScorePattern: map[string]map[models.QuestionType][]float64{"数据结构": {models.TypeMajor: {13, 10}}},
+	}
+	candidates := []models.PastQuestion{
+		{ID: "major-tree", Type: models.TypeMajor, Points: []string{"数据结构", "树"}, Score: 10, Difficulty: 0.5},
+		{ID: "major-graph", Type: models.TypeMajor, Points: []string{"数据结构", "图"}, Score: 10, Difficulty: 0.5},
+		{ID: "choice-list", Type: models.TypeChoice, Points: []string{"数据结构", "线性表"}, Score: 2, Difficulty: 0.5},
+		{ID: "choice-queue", Type: models.TypeChoice, Points: []string{"数据结构", "队列"}, Score: 2, Difficulty: 0.5},
+	}
+	spec, err := New(nil, nil).Compose(context.Background(), bp, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.Entries) != 2 || spec.Entries[0].Score != 13 || spec.Entries[1].Score != 10 {
+		t.Fatalf("major score sequence = %v, want [13 10]", func() []float64 {
+			scores := make([]float64, 0, len(spec.Entries))
+			for _, entry := range spec.Entries {
+				scores = append(scores, entry.Score)
+			}
+			return scores
+		}())
+	}
+}
+
+func TestLocalSearchDoesNotBreakDisciplineScorePattern(t *testing.T) {
+	bp := &Blueprint{
+		Subject: "408", TotalScore: 23, NumQuestions: 2,
+		TypeQuota:              map[models.QuestionType]float64{models.TypeMajor: 23},
+		TypeCountQuota:         map[models.QuestionType]int{models.TypeMajor: 2},
+		DisciplineQuota:        map[string]map[models.QuestionType]float64{"数据结构": {models.TypeMajor: 23}},
+		DisciplineCountQuota:   map[string]map[models.QuestionType]int{"数据结构": {models.TypeMajor: 2}},
+		DisciplineOrder:        []string{"数据结构"},
+		DisciplineScorePattern: map[string]map[models.QuestionType][]float64{"数据结构": {models.TypeMajor: {13, 10}}},
+		DiffHist:               map[models.DifficultyBand]float64{models.BandEasy: 0, models.BandMedium: 0, models.BandHard: 1},
+		DiffCountQuota:         map[models.DifficultyBand]int{models.BandEasy: 0, models.BandMedium: 0, models.BandHard: 2},
+		DifficultyCountStrict:  true,
+	}
+	selection := []candidateSpec{
+		{Type: models.TypeMajor, Points: []string{"数据结构", "旧题13"}, Score: 13, DiffBand: models.BandEasy},
+		{Type: models.TypeMajor, Points: []string{"数据结构", "旧题10"}, Score: 10, DiffBand: models.BandEasy},
+	}
+	pool := []candidateSpec{
+		{Type: models.TypeMajor, Points: []string{"数据结构", "替换14"}, Score: 14, DiffBand: models.BandHard},
+		{Type: models.TypeMajor, Points: []string{"数据结构", "替换9"}, Score: 9, DiffBand: models.BandHard},
+	}
+	got := New(nil, nil).localSearch(pool, selection, bp)
+	if got[0].Score+got[1].Score != 23 || !matchesScorePattern(got, []float64{13, 10}) {
+		t.Fatalf("local search changed the hard score pattern: %v, %v", got[0].Score, got[1].Score)
 	}
 }

@@ -53,6 +53,10 @@ var politicsOutOfScopeTokens = []string{
 var selfCorrectionTokens = []string{
 	"题目有误", "条件之间存在矛盾", "修改题面", "重新审视",
 	"假设题意", "如果题目要求", "不太对", "需手动补充",
+	"原选项", "修正题面", "重新设计", "重新校对", "未在选项中", "不在选项中",
+	"假设题目意图", "取决于具体的拓扑结构", "需根据拓扑图具体判断",
+	"重新审查", "重新检查", "再次检查", "重新核对", "选项中无", "选项中没有",
+	"无对应正确答案", "正确答案应", "推导过程有误", "修改后的选项", "鬼地方", "注：删去",
 }
 
 var explanationSignals = []string{
@@ -61,9 +65,17 @@ var explanationSignals = []string{
 	"because", "since", "therefore", "thus", "hence", "let", "given", "substitute", "calculate", "which means",
 }
 
+// englishExplanationSignals supplements the shared list for English papers. An
+// English answer can legitimately explain in English (means/explains/states) or
+// in Chinese (译文/要点/指代), and translation items discuss clauses and voice
+// rather than mathematical derivation, so the vocabulary is wider here.
 var englishExplanationSignals = []string{
-	"context", "grammar", "collocation", "meaning", "fits", "match", "matches", "suggests", "indicates",
+	"context", "grammar", "collocation", "meaning", "means", "fits", "match", "matches", "suggests", "indicates",
 	"refers to", "supports", "whereas", "unlike", "appropriate", "inappropriate", "consistent with", "in contrast",
+	"explains", "correct", "incorrect", "wrong", "option", "states", "mentions", "according to", "tone",
+	"structure", "clause", "voice", "purpose", "logical", "paragraph",
+	"翻译", "译文", "要点", "句意", "语法", "衔接", "逻辑", "指代", "语义", "意思", "正确", "错误", "原文",
+	"上文", "下文", "上下文", "主语", "谓语", "从句", "语序", "符合", "不符", "排除", "搭配",
 }
 
 // Issues returns deterministic quality failures for one generated question.
@@ -83,9 +95,11 @@ func Issues(q models.GeneratedQuestion) []string {
 		issues = append(issues, "参考答案包含疑似模型污染文本")
 	}
 	issues = append(issues, ExplanationIssues(q)...)
+	issues = append(issues, ChoiceConclusionIssues(q)...)
 	issues = append(issues, EnglishQuestionIssues(q)...)
 	if is408Question(q) {
 		issues = append(issues, DataStructure408Issues(strings.Join(append([]string{q.Stem, q.Answer}, q.Options...), "\n"))...)
+		issues = append(issues, AddressCalculationIssues(q)...)
 	}
 	for _, token := range selfCorrectionTokens {
 		if strings.Contains(q.Stem, token) || strings.Contains(q.Answer, token) {
@@ -114,14 +128,14 @@ func Issues(q models.GeneratedQuestion) []string {
 			}
 			labels := choice.Parse(q.Answer)
 			alphabet := "ABCD"
-			if models.IsEnglish2PartB(q.Points) {
+			if models.IsEnglishPartB(q.Points) {
 				alphabet = "ABCDEFG"
 				labels = choice.ParseWithAlphabet(q.Answer, alphabet)
 			}
 			if issue := choice.ValidateWithAlphabet(labels, q.Type == models.TypeMultiChoice, alphabet); issue != "" {
 				issues = append(issues, "选择题答案不在有效选项范围内")
 			}
-			if !models.IsEnglish2PartB(q.Points) {
+			if !models.IsEnglishPartB(q.Points) {
 				issues = append(issues, ChoiceConsistencyIssues(q)...)
 			}
 		}
@@ -129,10 +143,59 @@ func Issues(q models.GeneratedQuestion) []string {
 	return unique(issues)
 }
 
+// ChoiceConclusionIssues rejects answers whose explicit final-answer markers
+// disagree with the answer token at the beginning.  Models often calculate
+// one option correctly and then append a stale "选择 X" sentence; accepting
+// that text makes both answer keys and explanations unsafe.
+func ChoiceConclusionIssues(q models.GeneratedQuestion) []string {
+	if q.Type != models.TypeChoice && q.Type != models.TypeMultiChoice {
+		return nil
+	}
+	alphabet := "ABCD"
+	if models.IsEnglishPartB(q.Points) {
+		alphabet = "ABCDEFG"
+	}
+	initial := choice.ParseWithAlphabet(q.Answer, alphabet)
+	if len(initial) != 1 || strings.TrimSpace(q.Answer) == "" {
+		return nil
+	}
+	// Only inspect phrases that express a conclusion.  "A 项错误，B 项
+	// 正确" in the distractor analysis is not a final-answer marker.
+	finalMarker := regexp.MustCompile(`(?i)(?:因此|所以|故|故而|从而|综上|结论|最终(?:答案|选择)?|正确答案|选择)\s*(?:为|是|：|:)??\s*(?:选项)?\s*([` + alphabet + `])\s*(?:项|选项)?\s*(?:正确|错误|对|错)?(?:[。.!！,，;；]|$)`)
+	var issues []string
+	for _, match := range finalMarker.FindAllStringSubmatch(q.Answer, -1) {
+		if len(match) < 2 || strings.EqualFold(match[1], initial[0]) {
+			continue
+		}
+		issues = append(issues, fmt.Sprintf("答案首字母为 %s，但结论句给出 %s", initial[0], strings.ToUpper(match[1])))
+		break
+	}
+	return issues
+}
+
+// AddressCalculationIssues contains a small, deterministic guard for the
+// high-risk address-partitioning pattern used by the 408 corpus.  It catches
+// the old cached item before it can be delivered again: the virtual-page TLB
+// index comes from the virtual page number, the physical Cache index comes
+// from the physical address, and a 30-bit physical address must fit below
+// 0x40000000.
+func AddressCalculationIssues(q models.GeneratedQuestion) []string {
+	if q.SpecID != "spec_020" || !strings.Contains(q.Stem, "0x12345678") {
+		return nil
+	}
+	if strings.Contains(q.Stem, "0xABCDEF00") {
+		return []string{"30位物理地址不能取 0xABCDEF00；该地址超出 30 位地址空间"}
+	}
+	if strings.Contains(q.Answer, "TLB索引为 0x04") || strings.Contains(q.Answer, "Cache索引为 0x1F0") {
+		return []string{"地址划分计算不一致：TLB 索引应取虚拟页号低 4 位，Cache 索引应取物理地址低 11 位字段"}
+	}
+	return nil
+}
+
 // ExpectedChoiceOptionCount returns the option count for a generated
 // objective question. English II Part B uses seven shared headings (A-G).
 func ExpectedChoiceOptionCount(q models.GeneratedQuestion) int {
-	if models.IsEnglish2PartB(q.Points) {
+	if models.IsEnglishPartB(q.Points) {
 		return 7
 	}
 	return 4
@@ -343,7 +406,7 @@ func ExplanationIssues(q models.GeneratedQuestion) []string {
 				return []string{fmt.Sprintf("多选题解析未逐项说明 A-D（缺少 %s）", strings.Join(missing, ", "))}
 			}
 		}
-		if isEnglishQuestion(q) && q.Type == models.TypeChoice && !models.IsEnglish2PartB(q.Points) {
+		if isEnglishQuestion(q) && q.Type == models.TypeChoice && !models.IsEnglishPartB(q.Points) {
 			if missing := missingOptionExplanations(answer); len(missing) > 0 {
 				return []string{fmt.Sprintf("英语选择题解析未覆盖正确选项及干扰项 A-D（缺少 %s）", strings.Join(missing, ", "))}
 			}
@@ -370,7 +433,7 @@ func ExplanationIssues(q models.GeneratedQuestion) []string {
 		if len([]rune(text)) < minimum {
 			return []string{"解答题解析过短，缺少分步过程"}
 		}
-		if !containsExplanationSignal(text) {
+		if !containsExplanationSignal(text) && !(isEnglishQuestion(q) && containsEnglishExplanationSignal(text)) {
 			return []string{"解答题解析缺少推导过程或结论依据"}
 		}
 	}
@@ -444,6 +507,15 @@ func SubjectContentIssues(subject string, points []string, content string) []str
 		return PoliticsContentIssues(points, content)
 	}
 	if subject == "408" {
+		if len(points) == 0 || !models.Is408Discipline(models.DisciplineFromPoints(points)) {
+			return []string{"408 题位缺少有效的四科归属标签"}
+		}
+		for _, point := range points {
+			normalized := strings.ToLower(strings.TrimSpace(point))
+			if normalized == "unknown" || normalized == "未知" || normalized == "" || strings.Contains(normalized, "_auto_") {
+				return []string{fmt.Sprintf("408 题位知识点 %q 无效，必须先映射到有效考纲主题", point)}
+			}
+		}
 		return DataStructure408Issues(content)
 	}
 	if subject != "math2" && subject != "数学二" {
@@ -536,7 +608,63 @@ func NormalizePastQuestion(subject string, q models.PastQuestion) models.PastQue
 	if (subject == "math2" || subject == "数学二") && q.ID == "math2_2018_21" {
 		q.Points = []string{"高等数学", "函数、极限、连续", "数列敛散性的判定"}
 	}
+	return canonicalizeMathPoints(subject, q)
+}
+
+// mathDisciplineByChapter maps a chapter-level math knowledge point to the
+// discipline it belongs to. Some historical files label a question with its
+// chapter (e.g. 多元函数积分学) instead of the top-level discipline, which makes
+// the point path look like a different subject to discipline-aware code and
+// leaks a chapter name into prompts and the emitted spec table.
+var mathDisciplineByChapter = map[string]string{
+	"多元函数微分学":     "高等数学",
+	"多元函数积分学":     "高等数学",
+	"常微分方程":       "高等数学",
+	"微分方程":        "高等数学",
+	"无穷级数":        "高等数学",
+	"空间解析几何":      "高等数学",
+	"向量代数与空间解析几何": "高等数学",
+	"函数极限连续":      "高等数学",
+	"一元函数微分学":     "高等数学",
+	"一元函数积分学":     "高等数学",
+	"行列式":         "线性代数",
+	"矩阵":          "线性代数",
+	"向量":          "线性代数",
+	"线性方程组":       "线性代数",
+	"特征值与特征向量":    "线性代数",
+	"二次型":         "线性代数",
+	"随机事件与概率":     "概率论与数理统计",
+	"随机变量及其分布":    "概率论与数理统计",
+	"随机变量的数字特征":   "概率论与数理统计",
+	"大数定律与中心极限定理": "概率论与数理统计",
+	"数理统计的基本概念":   "概率论与数理统计",
+	"参数估计":        "概率论与数理统计",
+	"假设检验":        "概率论与数理统计",
+}
+
+// canonicalizeMathPoints prepends the discipline to a math point path that
+// starts at a chapter. The prepended label is what math2's syllabus gate and
+// models.DisciplineFromPoints expect, so out-of-syllabus questions (e.g. a
+// probability item inside Math II) are still rejected after normalization.
+func canonicalizeMathPoints(subject string, q models.PastQuestion) models.PastQuestion {
+	if !isMathSubject(subject) || len(q.Points) < 2 {
+		return q
+	}
+	discipline, ok := mathDisciplineByChapter[strings.TrimSpace(q.Points[0])]
+	if !ok {
+		return q
+	}
+	q.Points = append([]string{discipline}, q.Points...)
 	return q
+}
+
+func isMathSubject(subject string) bool {
+	switch strings.TrimSpace(subject) {
+	case "math1", "数学一", "math2", "数学二":
+		return true
+	default:
+		return false
+	}
 }
 
 // FilterPastQuestions normalizes known source-tag mistakes before rejecting
@@ -558,6 +686,10 @@ func PastQuestionInSubject(subject string, q models.PastQuestion) bool {
 	if subject == "politics" || subject == "政治" {
 		content := strings.Join(append([]string{q.Stem, q.Answer}, q.Options...), "\n")
 		return len(PoliticsContentIssues(q.Points, content)) == 0
+	}
+	if subject == "408" {
+		content := strings.Join(append([]string{q.Stem, q.Answer}, q.Options...), "\n")
+		return len(SubjectContentIssues(subject, q.Points, content)) == 0
 	}
 	if subject != "math2" && subject != "数学二" {
 		return true

@@ -1,10 +1,14 @@
-{{%define "document_preamble"%}}\documentclass[12pt]{ctexart}
+{{%define "document_preamble"%}}\documentclass[12pt,fontset=fandol]{ctexart}
 \usepackage[a4paper,top=2.4cm,bottom=2.4cm,left=2.4cm,right=2.4cm]{geometry}
 \usepackage{amsmath,amssymb}
 \usepackage{array,tabularx}
 \usepackage{fancyhdr}
 \usepackage{lastpage}
+\usepackage{needspace}
 \usepackage{newunicodechar}
+%% 生成内容偶发把中文标点写进数学模式；让数学模式中的 CJK 字符也走中文字体，
+%% 否则用 lmroman 排版缺少对应字形，整次编译会被判为渲染错误。
+\xeCJKsetup{CJKmath=true}
 %% CJK 正文字体缺数学符号字形 — 映射到数学模式保证可见
 \newunicodechar{≥}{\ensuremath{\geq}}
 \newunicodechar{≤}{\ensuremath{\leq}}

@@ -68,6 +68,56 @@ func TestFinishNormalizesDoubleEscapedNewlinesAndEnglishAnswers(t *testing.T) {
 	}
 }
 
+func TestFinishNormalizesMicrosecondUnitsForLaTeX(t *testing.T) {
+	g := New(nil, nil)
+	q, err := g.finish(choiceSpec(models.TypeChoice), generationResponse{
+		Stem:       `读取时间为 120\mu s，计算 $T=30\mu s$。`,
+		Options:    []string{`1500\mu s`, `1590\mu s`, `1620\mu s`, `2400\mu s`},
+		Answer:     `代入 $T=120\mu s$，总时间为 1590\mu s。`,
+		Difficulty: 0.5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(q.Stem, `120\mu s`) || !strings.Contains(q.Stem, `$120\,\mu\mathrm{s}$`) {
+		t.Errorf("plain-text unit was not wrapped as math: %q", q.Stem)
+	}
+	if !strings.Contains(q.Stem, `$T=30\,\mu\mathrm{s}$`) {
+		t.Errorf("existing math mode was not preserved: %q", q.Stem)
+	}
+	if !strings.Contains(q.Options[0], `$1500\,\mu\mathrm{s}$`) {
+		t.Errorf("choice option unit was not normalized: %q", q.Options[0])
+	}
+	if !strings.Contains(q.Answer, `$T=120\,\mu\mathrm{s}$`) || !strings.Contains(q.Answer, `$1590\,\mu\mathrm{s}$`) {
+		t.Errorf("answer units were not normalized: %q", q.Answer)
+	}
+}
+
+func TestNormalizeGeneratedLaTeXWrapsCommonAddressBusMathOutsideMathMode(t *testing.T) {
+	input := `CPU 的高位地址线 A15\sim A2 产生片选信号 \overline{CS}。现已知 $A_3\sim A_0$。`
+	got := NormalizeGeneratedLaTeX(input)
+	if !strings.Contains(got, `$A_{15}\sim A_{2}$`) || !strings.Contains(got, `$\overline{CS}$`) {
+		t.Fatalf("bare address-bus math was not wrapped: %q", got)
+	}
+	if !strings.Contains(got, `$A_3\sim A_0$`) {
+		t.Fatalf("existing math mode was changed: %q", got)
+	}
+}
+
+func TestNormalizeGeneratedLaTeXRepairsTabCorruptedMathCommand(t *testing.T) {
+	got := NormalizeGeneratedLaTeX("柱面编号 0$\thicksim$99")
+	if got != "柱面编号 0$\\sim$99" {
+		t.Fatalf("tab-corrupted math command = %q, want restored sim command", got)
+	}
+}
+
+func TestNormalizeGeneratedLaTeXUsesReadableRegisterRange(t *testing.T) {
+	got := NormalizeGeneratedLaTeX("通用寄存器R0~R3")
+	if got != "通用寄存器R0 至 R3" {
+		t.Fatalf("register range = %q, want readable text range", got)
+	}
+}
+
 func TestEnglishChoicePromptRequiresOneCompleteBlankAndClearRationale(t *testing.T) {
 	spec := models.SpecEntry{Type: models.TypeChoice, Points: []string{"英语一", "完形填空", "词汇与语法"}, Score: 0.5}
 	prompt := New(nil, nil).buildSystemPrompt(spec)
@@ -84,6 +134,36 @@ func Test408PromptRequiresPreciseGraphTraversalAndCycleReasoning(t *testing.T) {
 	for _, required := range []string{"递归栈/颜色状态", "不能只凭 visited 布尔标志", "访问序列、队列/递归栈"} {
 		if !strings.Contains(prompt, required) {
 			t.Errorf("408 prompt missing %q", required)
+		}
+	}
+}
+
+func Test408BPlusTreePromptDefinesOrderAndSplitRules(t *testing.T) {
+	spec := models.SpecEntry{Type: models.TypeMajor, Points: []string{"408", "数据结构", "B+树"}, Score: 15}
+	prompt := New(nil, nil).buildSystemPrompt(spec)
+	for _, required := range []string{"阶数 m 定义为每个内部结点的最大子女数", "最多 m-1 个关键字", "右叶首关键字复制到父结点", "仍保留在右叶", "子女数=关键字数+1", "禁止将B树删除/提升规则套用于B+叶分裂"} {
+		if !strings.Contains(prompt, required) {
+			t.Errorf("B+ tree prompt missing %q", required)
+		}
+	}
+}
+
+func Test408RIPPromptUsesHopCountAndSynchronousRounds(t *testing.T) {
+	spec := models.SpecEntry{Type: models.TypeMajor, Points: []string{"408", "计算机网络", "RIP路由协议", "路由表更新"}, Score: 7}
+	prompt := New(nil, nil).buildSystemPrompt(spec)
+	for _, required := range []string{"每条相邻链路增加 1", "不得给链路另设 2 等任意开销", "只能从拓扑中直接相邻的路由器接收距离向量", "严禁让路由器收到非邻居的路由表", "每个路由器各有一个直连局域网 N1、N2", "初始仅本地 LAN 的距离为 1", "每轮只依据上一轮已通告向量计算", "距离为 k+1"} {
+		if !strings.Contains(prompt, required) {
+			t.Errorf("RIP prompt missing %q", required)
+		}
+	}
+}
+
+func Test408ChoicePromptRequiresOneConsistentAnswer(t *testing.T) {
+	spec := models.SpecEntry{Type: models.TypeChoice, Points: []string{"408", "数据结构", "图的遍历"}, Score: 2}
+	prompt := New(nil, nil).buildSystemPrompt(spec)
+	for _, required := range []string{"先独立算出唯一结果", "首句与末句的答案字母必须相同", "全文只能给出一个最终答案", "不得保留自我纠错"} {
+		if !strings.Contains(prompt, required) {
+			t.Errorf("408 choice prompt missing %q", required)
 		}
 	}
 }
@@ -346,5 +426,183 @@ func TestGenerateRetriesOnceWhenChoiceShapeIsInvalid(t *testing.T) {
 	}
 	if !strings.Contains(firstRequest.Messages[0].Content.(string), "禁止生成填空题") {
 		t.Fatal("choice prompt does not explicitly forbid fill-in questions")
+	}
+}
+
+func TestNormalizeMovesCJKPunctuationOutOfMath(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			// Display math keeps its punctuation: moving it out would start the
+			// next line with 。, which Chinese typography forbids, and the
+			// preamble's CJKmath makes it render in place.
+			name: "trailing period inside display math stays put",
+			in:   "定义变限积分函数\n$$F(x)=\\int_{0}^{x}(x-t)f(t)\\,dt \\quad (x\\ge 0)。$$\n(1) 求导",
+			want: "定义变限积分函数\n$$F(x)=\\int_{0}^{x}(x-t)f(t)\\,dt \\quad (x\\ge 0)。$$\n(1) 求导",
+		},
+		{
+			name: "trailing period inside inline math moves out",
+			in:   "故 $x=1。$ 成立",
+			want: "故 $x=1$。 成立",
+		},
+		{
+			name: "parentheses around inline math",
+			in:   "若$（x）$取最大值",
+			want: "若（$x$）取最大值",
+		},
+		{
+			name: "punctuation outside math is untouched",
+			in:   "中文。$x$。$y$，结束。",
+			want: "中文。$x$。$y$，结束。",
+		},
+		{
+			name: "escaped dollar is not a delimiter",
+			in:   "价格为 \\$100。",
+			want: "价格为 \\$100。",
+		},
+		{
+			name: "line break bracket is not display math",
+			in:   "第一行 \\\\[2mm] 第二行。",
+			want: "第一行 \\\\[2mm] 第二行。",
+		},
+		{
+			// Bracket display math behaves like $$…$$.
+			name: "bracket display math keeps inner punctuation",
+			in:   "\\[a=b。\\]",
+			want: "\\[a=b。\\]",
+		},
+		{
+			// Content normalized by an older version had the period pushed out;
+			// pull it back so it cannot start the next line.
+			name: "punctuation after display math is pulled back inside",
+			in:   "$$F(x)=x \\quad (x\\ge 0)$$。\n(1) 求导",
+			want: "$$F(x)=x \\quad (x\\ge 0)。$$\n(1) 求导",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NormalizeGeneratedLaTeX(tc.in)
+			if got != tc.want {
+				t.Fatalf("NormalizeGeneratedLaTeX(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if twice := NormalizeGeneratedLaTeX(got); twice != got {
+				t.Fatalf("normalization is not idempotent: %q then %q", got, twice)
+			}
+		})
+	}
+}
+
+func TestNormalizeReplacesTildeFillBlanks(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// Stored form: the model wrote tildes as the blank.
+		{`则 $\lambda=$ \underline{~~~~~~~~}。`, `则 $\lambda=$ \underline{\quad\quad}。`},
+		// Rendered form: the assembler already escaped the tildes.
+		{`则 $\lambda=$ \underline{\textasciitilde{}\textasciitilde{}}。`, `则 $\lambda=$ \underline{\quad\quad}。`},
+		// A single tilde (or one escaped tilde) is prose, not a blank.
+		{`区间为 $[0,~1]$`, `区间为 $[0,~1]$`},
+		{`区间为 $[0,\textasciitilde{}1]$`, `区间为 $[0,\textasciitilde{}1]$`},
+	}
+	for _, tc := range cases {
+		got := NormalizeGeneratedLaTeX(tc.in)
+		if got != tc.want {
+			t.Errorf("NormalizeGeneratedLaTeX(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if twice := NormalizeGeneratedLaTeX(got); twice != got {
+			t.Errorf("not idempotent: %q then %q", got, twice)
+		}
+	}
+}
+
+func TestSyncAnswerSummaryCopiesTrailingAnswer(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "wrong leading summary is replaced by the derived answer",
+			in:   "答案：最大值为 $\\dfrac{1}{e}$。\n\n解析：\n求导得单调递减，故最大值为 $y(0)=1$。\n\n最终答案：最大值为 $1$",
+			want: "答案：最大值为 $1$\n\n解析：\n求导得单调递减，故最大值为 $y(0)=1$。\n\n最终答案：最大值为 $1$",
+		},
+		{
+			name: "already consistent summary is untouched",
+			in:   "答案：B\n\n推导后选择 B。\n\n最终答案：B",
+			want: "答案：B\n\n推导后选择 B。\n\n最终答案：B",
+		},
+		{
+			name: "no trailing authoritative line means no rewrite",
+			in:   "答案：B\n\n解析：选择 B。",
+			want: "答案：B\n\n解析：选择 B。",
+		},
+		{
+			name: "markdown emphasis keeps its label",
+			in:   "**答案：$\\dfrac{7}{2}$**\n\n解析：得到 $2$。\n\n**最终答案：$2$**",
+			want: "**答案：$2$**\n\n解析：得到 $2$。\n\n**最终答案：$2$**",
+		},
+		{
+			name: "multi-branch answer is copied whole",
+			in:   "答案：$\\mathrm{d}z=\\mathrm{d}x+\\mathrm{d}y$\n\n解析：两支为 $\\pm\\dfrac{1}{\\sqrt{2}}$。\n\n最终答案：$\\mathrm{d}z=\\pm\\dfrac{1}{\\sqrt{2}}(\\mathrm{d}x+\\mathrm{d}y)$",
+			want: "答案：$\\mathrm{d}z=\\pm\\dfrac{1}{\\sqrt{2}}(\\mathrm{d}x+\\mathrm{d}y)$\n\n解析：两支为 $\\pm\\dfrac{1}{\\sqrt{2}}$。\n\n最终答案：$\\mathrm{d}z=\\pm\\dfrac{1}{\\sqrt{2}}(\\mathrm{d}x+\\mathrm{d}y)$",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SyncAnswerSummary(tc.in); got != tc.want {
+				t.Fatalf("SyncAnswerSummary(%q)\n got %q\nwant %q", tc.in, got, tc.want)
+			}
+			if twice := SyncAnswerSummary(SyncAnswerSummary(tc.in)); twice != SyncAnswerSummary(tc.in) {
+				t.Fatalf("not idempotent: %q", twice)
+			}
+		})
+	}
+}
+
+func TestSyncAnswerSummaryHandlesBoldLabelAndMissingHead(t *testing.T) {
+	// Bold label with a bold payload: the label must parse and the payload sync.
+	bold := "**答案**：(2) 极限值为 $0$。\n\n解析：得到 $\\dfrac{1}{3}$。\n\n最终答案：(2) 极限值为 $\\dfrac{1}{3}$"
+	want := "**答案：(2) 极限值为 $\\dfrac{1}{3}$**\n\n解析：得到 $\\dfrac{1}{3}$。\n\n最终答案：(2) 极限值为 $\\dfrac{1}{3}$"
+	if got := SyncAnswerSummary(bold); got != want {
+		t.Errorf("bold label case:\n got %q\nwant %q", got, want)
+	}
+
+	// No leading summary at all: one is created from the trailing answer.
+	missing := "逐步推导：\n$v = \\ln x + 1 + x$。\n\n最终答案：$y = \\dfrac{1}{\\ln x + x + 1}$"
+	if got := SyncAnswerSummary(missing); got != "答案：$y = \\dfrac{1}{\\ln x + x + 1}$\n\n"+missing {
+		t.Errorf("missing head case:\n got %q", got)
+	}
+	// Idempotent: the inserted line now equals the trailing answer.
+	once := SyncAnswerSummary(missing)
+	if twice := SyncAnswerSummary(once); twice != once {
+		t.Errorf("not idempotent: %q", twice)
+	}
+}
+
+func TestNormalizeSmartenQuotes(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`The phrase "changed their minds" suggests that the council`, `The phrase \textquotedblleft changed their minds\textquotedblright  suggests that the council`},
+		{`他说“你好”`, `他说“你好”`},                     // Chinese quotes stay
+		{`单位是 $L=1"$ 的英寸标记`, `单位是 $L=1"$ 的英寸标记`}, // quotes inside math stay
+		{`只有一个 " 引号`, `只有一个 " 引号`},               // unpaired stays
+	}
+	for _, tc := range cases {
+		if got := NormalizeGeneratedLaTeX(tc.in); got != tc.want {
+			t.Errorf("NormalizeGeneratedLaTeX(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestNormalizeRepairsBacktickQuotes(t *testing.T) {
+	in := "The phrase ``changed their minds'' suggests"
+	want := `The phrase \textquotedblleft changed their minds\textquotedblright  suggests`
+	if got := NormalizeGeneratedLaTeX(in); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	// A lone opening pair is repaired too (its closing quote was already lost).
+	lone := "他说 ``你好 就走了"
+	if got := NormalizeGeneratedLaTeX(lone); !strings.Contains(got, `\textquotedblleft`) || strings.Contains(got, "``") {
+		t.Fatalf("lone backtick quote not repaired: %q", got)
 	}
 }

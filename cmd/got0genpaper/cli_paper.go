@@ -146,13 +146,24 @@ func normalizeEnglishPaperOrder(paper *models.ExamPaper) error {
 			return fmt.Errorf("英语题目 %s 缺少分区知识点，无法重排", question.ID)
 		}
 		question.Points = append([]string(nil), question.Points...)
-		if strings.EqualFold(strings.TrimSpace(paper.Subject), "english2") || strings.TrimSpace(paper.Subject) == "英语二" {
-			if len(question.Points) >= 4 && strings.EqualFold(strings.TrimSpace(question.Points[1]), "阅读理解") &&
-				strings.EqualFold(strings.TrimSpace(question.Points[2]), "Part B") {
-				question.Points[3] = "人物观点匹配"
+		// A complete paper can rebuild every path from the official map: cached
+		// papers may carry the corpus's own text/position labels, which would
+		// mislabel the section. Partial papers keep their own section labels;
+		// only the Part B task label (English I and English II name it
+		// differently) and the position tag are canonicalised.
+		completePaper := models.EnglishPaperSize(paper.Subject) == len(paper.Questions)
+		path, hasPath := models.EnglishPointsPath(paper.Subject, i+1)
+		switch {
+		case hasPath && completePaper:
+			question.Points = path
+		default:
+			if len(question.Points) >= 4 && models.IsEnglishPartB(question.Points) {
+				if label := models.EnglishPartBTaskLabel(paper.Subject); label != "" {
+					question.Points[3] = label
+				}
 			}
+			question.Points[len(question.Points)-1] = fmt.Sprintf("题位%d", i+1)
 		}
-		question.Points[len(question.Points)-1] = fmt.Sprintf("题位%d", i+1)
 		entry, ok := entriesByID[question.SpecID]
 		if !ok {
 			return fmt.Errorf("英语题目 %s 找不到对应细目表条目 %s", question.ID, question.SpecID)
@@ -187,15 +198,20 @@ func runRepair(args []string) error {
 		return err
 	}
 	result, err := a.repairStoredPaper(ids)
-	if err != nil {
-		return err
+	// A partial repair still returns the paper and its validation, so print the
+	// view before surfacing the error: the user needs to see which slots were
+	// fixed and which ones still need attention.
+	if result != nil {
+		view := struct {
+			Rounds     int                         `json:"rounds"`
+			Validation *validator.ValidationResult `json:"validation"`
+			OutputDir  string                      `json:"outputDir"`
+		}{result.Rounds, result.Validation, a.store.OutputDir}
+		if printErr := printJSON(view); printErr != nil {
+			return printErr
+		}
 	}
-	view := struct {
-		Rounds     int                         `json:"rounds"`
-		Validation *validator.ValidationResult `json:"validation"`
-		OutputDir  string                      `json:"outputDir"`
-	}{result.Rounds, result.Validation, a.store.OutputDir}
-	if err := printJSON(view); err != nil {
+	if err != nil {
 		return err
 	}
 	if *compile {

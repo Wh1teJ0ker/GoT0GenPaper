@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"GoT0GenPaper/internal/models"
@@ -83,7 +84,10 @@ func (a *app) runPipeline(req PipelineRequest) (*PipelineSummary, error) {
 		return nil, fmt.Errorf("stage1 parse: no past questions available")
 	}
 	questions := a.lastParse.Questions
-	if subject, ok := subjectProfile(req.Blueprint.Subject); ok && (subject.Key == "math2" || subject.Key == "politics") {
+	// Normalize and subject-filter the corpus for every subject: besides dropping
+	// out-of-syllabus items, this applies the point-path corrections (math
+	// chapter → discipline prefix) that composition and the spec table rely on.
+	if subject, ok := subjectProfile(req.Blueprint.Subject); ok {
 		questions = quality.FilterPastQuestions(subject.Key, questions)
 		a.lastParse.Questions = append([]models.PastQuestion(nil), questions...)
 		if err := a.attachParseArtifacts(a.lastParse); err != nil {
@@ -92,9 +96,15 @@ func (a *app) runPipeline(req PipelineRequest) (*PipelineSummary, error) {
 	}
 	summary.ParseCount = len(questions)
 
-	// Stage 2: GNN weights.
-	if _, err := a.predictWeights(questions); err != nil {
-		return nil, fmt.Errorf("stage2 gnn: %w", err)
+	// Stage 2: GNN weights. English papers are written article-first, so they do
+	// not consume knowledge-point priors; predicting them would only burn model
+	// calls.
+	if models.EnglishPaperSize(req.Blueprint.Subject) == 0 {
+		if _, err := a.predictWeights(questions); err != nil {
+			return nil, fmt.Errorf("stage2 gnn: %w", err)
+		}
+	} else {
+		summary.Warnings = append(summary.Warnings, "英语试卷采用文章先行的生成流程，已跳过知识点预测阶段")
 	}
 
 	// Stage 3: compose spec table.
@@ -164,6 +174,12 @@ func cachedParseMatchesSubject(parsed *parser.ParseResult, subject string) bool 
 		if profile.Key == "politics" && !quality.IsPoliticsPointSet(question.Points) {
 			return false
 		}
+		// 408 composition must only use questions carrying one of the four
+		// course disciplines: the generation gate rejects unlabelled slots, so
+		// reusing a cache with unlabelled 408 questions would fail stage 4.
+		if profile.Key == "408" && !models.Is408Discipline(models.DisciplineFromPoints(question.Points)) {
+			return false
+		}
 	}
 	return true
 }
@@ -223,6 +239,9 @@ func (a *app) regenerateSlots(ctx context.Context, paper *models.ExamPaper, spec
 	if paper == nil || len(specIDs) == 0 {
 		return false
 	}
+	if repaired, handled := a.regenerateEnglishGroups(ctx, paper, specIDs); handled {
+		return repaired
+	}
 	specByID := make(map[string]models.SpecEntry, len(paper.SpecTable.Entries))
 	for _, entry := range paper.SpecTable.Entries {
 		specByID[entry.ID] = entry
@@ -238,6 +257,23 @@ func (a *app) regenerateSlots(ctx context.Context, paper *models.ExamPaper, spec
 		if !ok {
 			continue
 		}
+		// Deterministic repair first: fixing a known artifact must not spend a
+		// provider request, and must work with no LLM at all. The repair only
+		// applies when the slot's knowledge points still match its topic.
+		if existing, ok := questionForSpec(paper, sid); ok {
+			if known, changed := quality.RepairKnownQuestion(existing); changed {
+				if replaceQuestionForSpec(paper, sid, known) {
+					repaired = true
+				}
+				continue
+			}
+			if quality.IsReviewedRepairSatisfied(existing) {
+				// Already carries the reviewed content: repairing this slot again
+				// is a no-op, not a reason to spend a provider request.
+				repaired = true
+				continue
+			}
+		}
 		nq, err := a.gen.GenerateForSubject(ctx, paper.Subject, entry)
 		if err != nil {
 			continue
@@ -247,6 +283,85 @@ func (a *app) regenerateSlots(ctx context.Context, paper *models.ExamPaper, spec
 		}
 	}
 	return repaired
+}
+
+// regenerateEnglishGroups repairs an English paper group by group. Every
+// question of a composite group shares one passage (and one option list), so
+// regenerating a single violated slot would silently drop the shared material
+// and break the composite contract the validator enforces.
+func (a *app) regenerateEnglishGroups(ctx context.Context, paper *models.ExamPaper, specIDs []string) (repaired, handled bool) {
+	if models.EnglishPaperSize(paper.Subject) == 0 {
+		return false, false
+	}
+	wanted := make(map[string]bool, len(specIDs))
+	for _, sid := range specIDs {
+		wanted[sid] = true
+	}
+	groupOfSpec := make(map[string]string, len(paper.Questions))
+	for _, q := range paper.Questions {
+		if q.GroupID != "" {
+			groupOfSpec[q.SpecID] = q.GroupID
+		}
+	}
+	groupIDs := make(map[string]bool)
+	for sid := range wanted {
+		if groupID := groupOfSpec[sid]; groupID != "" {
+			groupIDs[groupID] = true
+		}
+	}
+	if len(groupIDs) == 0 {
+		return false, false
+	}
+	entriesByGroup := make(map[string][]models.SpecEntry, len(groupIDs))
+	for _, entry := range paper.SpecTable.Entries {
+		groupID := groupOfSpec[entry.ID]
+		if groupID != "" && groupIDs[groupID] {
+			entriesByGroup[groupID] = append(entriesByGroup[groupID], entry)
+		}
+	}
+	repaired = false
+	for groupID := range groupIDs {
+		entries := entriesByGroup[groupID]
+		if len(entries) == 0 {
+			continue
+		}
+		// Reuse the passage already stored on the paper: a repair rebuilds the
+		// questions, not the article they were written from.
+		storedArticle := articleForGroupGroupID(paper.Questions, groupID)
+		questions, err := a.gen.RegenerateEnglishGroup(ctx, paper.Subject, groupID, entries, storedArticle)
+		if err != nil {
+			// Leave the previous group content untouched; the repair report names
+			// the slots that still need attention.
+			continue
+		}
+		for _, question := range questions {
+			if replaceQuestionForSpec(paper, question.SpecID, question) {
+				repaired = true
+			}
+		}
+	}
+	return repaired, true
+}
+
+// articleForGroupGroupID returns the shared passage stored on a group's
+// questions (empty when the group is missing).
+func articleForGroupGroupID(questions []models.GeneratedQuestion, groupID string) string {
+	for _, question := range questions {
+		if question.GroupID == groupID && strings.TrimSpace(question.SharedMaterial) != "" {
+			return question.SharedMaterial
+		}
+	}
+	return ""
+}
+
+// questionForSpec returns the generated question currently bound to a spec slot.
+func questionForSpec(paper *models.ExamPaper, specID string) (models.GeneratedQuestion, bool) {
+	for _, question := range paper.Questions {
+		if question.SpecID == specID {
+			return question, true
+		}
+	}
+	return models.GeneratedQuestion{}, false
 }
 
 // replaceQuestionForSpec replaces a generated question in place, or appends a

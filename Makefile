@@ -35,10 +35,10 @@ test-race:
 	$(GO) test -race ./...
 
 test-integration:
-	RUN_PIPELINE_TESTS=1 $(GO) test ./cmd/got0genpaper -run 'TestRunPipelineSmoke|TestRunPipelineZeroRepairRoundsOnlyValidates|TestStageFlowWithState' -v
+	RUN_PIPELINE_TESTS=1 $(GO) test ./cmd/got0genpaper -run 'TestRunPipelineSmoke|TestRunPipelineZeroRepairRoundsOnlyValidates|TestGenerationStageFlow' -v
 
 test-corpus:
-	RUN_CORPUS_TESTS=1 $(GO) test ./cmd/got0genpaper -run 'TestMath2CompositionUsesDifficultyTargets|TestAllSelectableSubjectsCanComposeFromBundledQuestions' -v
+	RUN_CORPUS_TESTS=1 $(GO) test ./cmd/got0genpaper -run 'TestMath2CompositionUsesDifficultyTargets|TestAllSelectableSubjectsCanComposeFromBundledQuestions|TestAllSubjectsOfflinePipelineEndToEnd' -v
 
 test-output-audit:
 	RUN_OUTPUT_AUDIT=1 $(GO) test ./cmd/got0genpaper -run TestReassembleAudit -v

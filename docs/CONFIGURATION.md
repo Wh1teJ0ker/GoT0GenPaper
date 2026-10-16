@@ -9,29 +9,28 @@ chmod 600 config.toml
 
 配置包含 API Key 时只保存在本机，不要提交到仓库或粘贴进日志。
 
-## 多供应商
+## 当前供应商
 
-每个供应商使用一个 `[[providers.providers]]` 表，`active_id` 选择当前供应商。`model_by_type` 可按题型设置生成模型；`default_model` 用于没有专属映射时的生成。可选的 `fallback_model` 在主生成模型请求失败时作为备用模型。
+当前运行配置只保留本地 `http://localhost:8792/` 的 `glm-5.3-flash`。`model_by_type` 按题型指定模型；`default_model` 用于没有专属映射时的生成。可选的 `fallback_model` 在主生成模型请求失败时作为备用模型。
 
 ```toml
 [providers]
-active_id = "glm-local"
+active_id = "local-glm-5.3-flash"
 
 [[providers.providers]]
-id = "glm-local"
-name = "Local GLM"
-base_url = "http://127.0.0.1:3001"
+id = "local-glm-5.3-flash"
+name = "Local GLM 5.3 Flash (8792)"
+base_url = "http://localhost:8792/"
 api_key = ""
-default_model = "glm-5.2"
-fallback_model = "glm-5.2"
+default_model = "glm-5.3-flash"
 reasoning_effort = "low"
 max_tokens = 8192
 enabled = true
 
 [providers.providers.model_by_type]
-choice = "glm-5.2"
-fill_blank = "glm-5.2"
-major = "glm-5.2"
+choice = "glm-5.3-flash"
+fill_blank = "glm-5.3-flash"
+major = "glm-5.3-flash"
 ```
 
 旧配置中的 `judge_model` 会在加载时迁移为 `fallback_model`；旧环境变量 `NEWAPI_MODEL_JUDGE` 也仍作为兼容别名。新配置请使用 `fallback_model` / `NEWAPI_MODEL_FALLBACK`。
@@ -39,10 +38,8 @@ major = "glm-5.2"
 ```bash
 got0genpaper config list
 got0genpaper config show
-got0genpaper config use glm-local
-got0genpaper config add --id deepseek --name DeepSeek --base-url https://api.deepseek.com --model deepseek-chat
-got0genpaper config remove deepseek
-got0genpaper test-provider --provider glm-local
+got0genpaper config use local-glm-5.3-flash
+got0genpaper test-provider --provider local-glm-5.3-flash
 ```
 
 避免把密钥写进 `--api-key` 参数，以免被 shell 历史或进程列表记录。编辑权限为 `0600` 的 TOML，或使用 `NEWAPI_API_KEY` 临时覆盖 active provider。

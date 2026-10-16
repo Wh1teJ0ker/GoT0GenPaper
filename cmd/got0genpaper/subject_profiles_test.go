@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"reflect"
@@ -12,17 +13,38 @@ import (
 
 func TestSelectableSubjectProfiles(t *testing.T) {
 	want := map[string]struct {
-		label      string
-		total      float64
-		questions  int
-		files      int
-		parsed     int
-		quota      map[models.QuestionType]float64
-		countQuota map[models.QuestionType]int
-		discQuota  map[string]map[models.QuestionType]float64
-		discCounts map[string]map[models.QuestionType]int
+		label       string
+		total       float64
+		questions   int
+		files       int
+		parsed      int
+		quota       map[models.QuestionType]float64
+		countQuota  map[models.QuestionType]int
+		discQuota   map[string]map[models.QuestionType]float64
+		discCounts  map[string]map[models.QuestionType]int
+		discPattern map[string]map[models.QuestionType][]float64
 	}{
-		"408":   {label: "408", total: 150, questions: 47, files: 18, parsed: 846, quota: map[models.QuestionType]float64{models.TypeChoice: 80, models.TypeMajor: 70}},
+		"408": {label: "408", total: 150, questions: 47, files: 18, parsed: 846,
+			quota:      map[models.QuestionType]float64{models.TypeChoice: 80, models.TypeMajor: 70},
+			countQuota: map[models.QuestionType]int{models.TypeChoice: 40, models.TypeMajor: 7},
+			discQuota: map[string]map[models.QuestionType]float64{
+				"数据结构":  {models.TypeChoice: 22, models.TypeMajor: 23},
+				"组成原理":  {models.TypeChoice: 22, models.TypeMajor: 23},
+				"操作系统":  {models.TypeChoice: 20, models.TypeMajor: 15},
+				"计算机网络": {models.TypeChoice: 16, models.TypeMajor: 9},
+			},
+			discCounts: map[string]map[models.QuestionType]int{
+				"数据结构":  {models.TypeChoice: 11, models.TypeMajor: 2},
+				"组成原理":  {models.TypeChoice: 11, models.TypeMajor: 2},
+				"操作系统":  {models.TypeChoice: 10, models.TypeMajor: 2},
+				"计算机网络": {models.TypeChoice: 8, models.TypeMajor: 1},
+			},
+			discPattern: map[string]map[models.QuestionType][]float64{
+				"数据结构":  {models.TypeMajor: {13, 10}},
+				"组成原理":  {models.TypeMajor: {10, 13}},
+				"操作系统":  {models.TypeMajor: {7, 8}},
+				"计算机网络": {models.TypeMajor: {9}},
+			}},
 		"math1": {label: "数学一", total: 150, questions: 22, files: 19, parsed: 431, quota: map[models.QuestionType]float64{models.TypeChoice: 50, models.TypeFillBlank: 30, models.TypeMajor: 70}, countQuota: map[models.QuestionType]int{models.TypeChoice: 10, models.TypeFillBlank: 6, models.TypeMajor: 6}},
 		"math2": {label: "数学二", total: 150, questions: 22, files: 19, parsed: 431,
 			quota:      map[models.QuestionType]float64{models.TypeChoice: 50, models.TypeFillBlank: 30, models.TypeMajor: 70},
@@ -74,6 +96,17 @@ func TestSelectableSubjectProfiles(t *testing.T) {
 			for qt, score := range quotas {
 				if profile.DisciplineQuota[discipline][qt] != score {
 					t.Errorf("%s discipline quota[%s][%s] = %.0f; want %.0f", key, discipline, qt, profile.DisciplineQuota[discipline][qt], score)
+				}
+			}
+		}
+		if len(profile.DisciplineScorePattern) != len(expected.discPattern) {
+			t.Errorf("%s discipline score patterns = %d; want %d", key, len(profile.DisciplineScorePattern), len(expected.discPattern))
+		}
+		for discipline, patterns := range expected.discPattern {
+			for qt, pattern := range patterns {
+				got := profile.DisciplineScorePattern[discipline][qt]
+				if !reflect.DeepEqual(got, pattern) {
+					t.Errorf("%s discipline score pattern[%s][%s] = %v; want %v", key, discipline, qt, got, pattern)
 				}
 			}
 		}
@@ -324,22 +357,38 @@ func TestAllSelectableSubjectsCanComposeFromBundledQuestions(t *testing.T) {
 				t.Errorf("compose %s type %s count = %d; want %d", key, questionType, counts[questionType], want)
 			}
 		}
-		if key == "math2" {
+		if bp.DifficultyCountStrict && len(bp.DiffCountQuota) > 0 {
+			// Strict subjects (english1/english2/politics) must hit the exact band
+			// histogram. The bundled English II corpus labels every item as one
+			// band, so this guards the per-band synthetic top-up in composition.
+			bands := make(map[models.DifficultyBand]int)
+			for _, entry := range spec.Entries {
+				bands[entry.DiffBand]++
+			}
+			for band, want := range bp.DiffCountQuota {
+				if bands[band] != want {
+					t.Errorf("compose %s band %d count = %d; want %d (all=%v)", key, band, bands[band], want, bands)
+				}
+			}
+		}
+		if len(profile.DisciplineQuota) > 0 {
+			// Subjects with an official discipline split (408, math2) must hit it
+			// exactly, in discipline order, for every question type.
 			domainCounts := make(map[string]map[models.QuestionType]int)
 			domainScores := make(map[string]map[models.QuestionType]float64)
 			lastDomainByType := make(map[models.QuestionType]int)
 			seenType := make(map[models.QuestionType]bool)
 			for _, entry := range spec.Entries {
-				domain := math2Discipline(entry.Points)
+				domain := models.DisciplineFromPoints(entry.Points)
 				if domainCounts[domain] == nil {
 					domainCounts[domain] = make(map[models.QuestionType]int)
 					domainScores[domain] = make(map[models.QuestionType]float64)
 				}
 				domainCounts[domain][entry.Type]++
 				domainScores[domain][entry.Type] += entry.Score
-				order := map[string]int{"高等数学": 0, "线性代数": 1}[domain]
+				order := disciplineOrderRank(profile.DisciplineOrder, domain)
 				if seenType[entry.Type] && order < lastDomainByType[entry.Type] {
-					t.Errorf("math2 %s discipline order regressed at spec %s", entry.Type, entry.ID)
+					t.Errorf("%s %s discipline order regressed at spec %s", key, entry.Type, entry.ID)
 				}
 				seenType[entry.Type] = true
 				lastDomainByType[entry.Type] = order
@@ -347,21 +396,103 @@ func TestAllSelectableSubjectsCanComposeFromBundledQuestions(t *testing.T) {
 			for discipline, quotas := range profile.DisciplineQuota {
 				for questionType, want := range quotas {
 					if domainScores[discipline][questionType] != want {
-						t.Errorf("math2 %s %s score = %.1f; want %.1f", discipline, questionType, domainScores[discipline][questionType], want)
+						t.Errorf("%s %s %s score = %.1f; want %.1f", key, discipline, questionType, domainScores[discipline][questionType], want)
 					}
 				}
 			}
 			for discipline, quotas := range profile.DisciplineCountQuota {
 				for questionType, want := range quotas {
 					if domainCounts[discipline][questionType] != want {
-						t.Errorf("math2 %s %s count = %d; want %d", discipline, questionType, domainCounts[discipline][questionType], want)
+						t.Errorf("%s %s %s count = %d; want %d", key, discipline, questionType, domainCounts[discipline][questionType], want)
 					}
+				}
+			}
+		}
+		if key == "english1" {
+			// English I has fixed per-section scores (cloze 0.5, reading 2,
+			// translation 2×5, application letter 10, essay 20). An invented
+			// half-point score would create a question type the paper has none of.
+			mix := make(map[string]int)
+			for _, entry := range spec.Entries {
+				mix[fmt.Sprintf("%s/%.1f", entry.Type, entry.Score)]++
+			}
+			want := map[string]int{"choice/0.5": 20, "choice/2.0": 25, "major/2.0": 5, "major/10.0": 1, "major/20.0": 1}
+			for shape, count := range want {
+				if mix[shape] != count {
+					t.Errorf("english1 %s count = %d; want %d (all=%v)", shape, mix[shape], count, mix)
 				}
 			}
 		}
 	}
 }
 
-func math2Discipline(points []string) string {
-	return models.DisciplineFromPoints(points)
+// disciplineOrderRank returns the position of discipline in the blueprint order,
+// or len(order) when it is absent (unknown labels sort last).
+func disciplineOrderRank(order []string, discipline string) int {
+	for i, item := range order {
+		if item == discipline {
+			return i
+		}
+	}
+	return len(order)
+}
+
+// TestStrictDifficultyPresetsHitTargetsForPrioritySubjects pins the strict
+// difficulty path for 408 and both math subjects: the requested easy/medium/hard
+// histogram must be met exactly, not approximated, and the official type and
+// discipline structure must survive the band allocation.
+func TestStrictDifficultyPresetsHitTargetsForPrioritySubjects(t *testing.T) {
+	if os.Getenv("RUN_CORPUS_TESTS") != "1" {
+		t.Skip("set RUN_CORPUS_TESTS=1 to compose against bundled corpora")
+	}
+	cases := []struct {
+		subject, preset, counts string
+	}{
+		{subject: "408", preset: "hard"},
+		{subject: "408", counts: "14,24,9"},
+		{subject: "math1", preset: "hard"},
+		{subject: "math2", preset: "easy"},
+		{subject: "math2", counts: "2,10,10"},
+	}
+	a := newTestApp(t)
+	for _, tc := range cases {
+		name := tc.subject + "_" + tc.preset + tc.counts
+		t.Run(name, func(t *testing.T) {
+			profile, _ := subjectProfile(tc.subject)
+			parsed, err := a.parser.Parse(t.Context(), repoPath("data", profile.Source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			bp, err := blueprintForSubjectDifficulty(tc.subject, tc.preset, "", tc.counts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bp.DifficultyCountStrict || len(bp.DiffCountQuota) == 0 {
+				t.Fatalf("preset %q/%q did not activate the strict difficulty contract", tc.preset, tc.counts)
+			}
+			spec, err := a.orch.Compose(t.Context(), &bp, parsed.Questions)
+			if err != nil {
+				t.Fatalf("compose %s: %v", name, err)
+			}
+			bands := make(map[models.DifficultyBand]int)
+			counts := make(map[models.QuestionType]int)
+			for _, entry := range spec.Entries {
+				bands[entry.DiffBand]++
+				counts[entry.Type]++
+			}
+			for band, want := range bp.DiffCountQuota {
+				if bands[band] != want {
+					t.Errorf("%s band %d = %d, want %d (all=%v)", name, band, bands[band], want, bands)
+				}
+			}
+			for questionType, want := range profile.TypeCountQuota {
+				if counts[questionType] != want {
+					t.Errorf("%s type %s = %d, want %d", name, questionType, counts[questionType], want)
+				}
+			}
+			if math.Abs(spec.TotalScore-profile.TotalScore) > 0.5 {
+				t.Errorf("%s total = %.0f, want %.0f", name, spec.TotalScore, profile.TotalScore)
+			}
+		})
+	}
 }

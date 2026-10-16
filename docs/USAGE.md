@@ -25,7 +25,7 @@ make build
 
 ```bash
 ./bin/got0genpaper test-provider
-./bin/got0genpaper test-provider --provider glm-local
+./bin/got0genpaper test-provider --provider local-glm-5.3-flash
 ./bin/got0genpaper test --network
 ```
 
@@ -34,6 +34,8 @@ make build
 ## 3. 生成试卷
 
 支持 `408`、`数学一`、`数学二`、`英语一`、`英语二` 和 `政治`。默认从配置 `data_dir` 下对应的真题目录读取语料。
+
+英语一/英语二不使用知识点预测组卷：题位、题型、分值来自官方固定结构，难度按蓝图目标直接分配到题位。内容采用**文章先行**流程——先得到一篇完整文章（默认由模型撰写；配置 `[english] article_source = "websearch"` 时先搜索网页并抓取真实文章，失败会自动回退），再基于该文章生成完形填空、阅读、Part B 与翻译题目。因此英语卷的语义约束是「题目必须源于文章」：生成器只允许在文章中挖空或整句删除，改写正文会被结构校验拒绝。
 
 ```bash
 # 生成 408，输出 paper.json 与 exam.tex

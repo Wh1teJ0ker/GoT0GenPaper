@@ -91,6 +91,17 @@ func (a *app) rewire() {
 		a.gen.ModelByType = provider.ModelByType
 		a.gen.DefaultModel = provider.DefaultModel
 	}
+	// English passages are written article-first; the article may alternatively
+	// be fetched from the web (config [english] article_source = "websearch").
+	a.gen.ArticleSource = generator.ArticleSourceOptions{
+		Kind:       generator.ArticleSourceKind(strings.ToLower(strings.TrimSpace(a.cfg.English.ArticleSource))),
+		SearchURL:  a.cfg.English.SearchURL,
+		APIKey:     a.cfg.English.SearchAPIKey,
+		MaxResults: a.cfg.English.SearchResults,
+	}
+	if a.gen.ArticleSource.Kind == "" {
+		a.gen.ArticleSource.Kind = generator.ArticleSourceWrite
+	}
 	// Cross-family fallback for flaky channels (truncation, upstream blips).
 	if provider != nil {
 		if fb := provider.FallbackModel; fb != "" && fb != a.gen.DefaultModel {
@@ -220,7 +231,10 @@ func (a *app) composeExam(bp orchestrator.Blueprint, candidates []models.PastQue
 	if useCachedCandidates {
 		candidates = a.lastParse.Questions
 	}
-	if subject, ok := subjectProfile(bp.Subject); ok && (subject.Key == "math2" || subject.Key == "politics") {
+	// Normalize and subject-filter candidates for every subject: besides dropping
+	// out-of-syllabus items, this applies the point-path corrections (math
+	// chapter → discipline prefix) that composition and the spec table rely on.
+	if subject, ok := subjectProfile(bp.Subject); ok {
 		candidates = quality.FilterPastQuestions(subject.Key, candidates)
 		if useCachedCandidates {
 			a.lastParse.Questions = append([]models.PastQuestion(nil), candidates...)
@@ -320,9 +334,42 @@ func (a *app) repairStoredPaper(specIDs []string) (*RepairOutput, error) {
 			return nil, validateErr
 		}
 		specIDs = val.ViolatedSpecIDs
+		if len(specIDs) == 0 {
+			// Nothing to repair: report the current state instead of failing the
+			// command, so repairing an already-clean paper is a no-op success.
+			return &RepairOutput{Paper: *paper, Rounds: 0, Validation: val}, nil
+		}
+	}
+	// Snapshot the requested slots: when the provider is unavailable the
+	// generator degrades to a placeholder, and a stored paper must not have its
+	// content clobbered by a failed repair attempt.
+	before := make(map[string]models.GeneratedQuestion, len(specIDs))
+	for _, sid := range specIDs {
+		if q, ok := questionForSpec(paper, sid); ok {
+			before[sid] = q
+		}
 	}
 	if !a.regenerateSlots(a.ctx, paper, specIDs) {
 		return nil, fmt.Errorf("没有成功修复指定题位: %s", strings.Join(specIDs, ", "))
+	}
+	var unresolved []string
+	seen := make(map[string]bool, len(specIDs))
+	for _, sid := range specIDs {
+		if seen[sid] {
+			continue
+		}
+		seen[sid] = true
+		if q, ok := questionForSpec(paper, sid); ok && q.Status == "ready" {
+			continue
+		}
+		if old, ok := before[sid]; ok {
+			replaceQuestionForSpec(paper, sid, old)
+		}
+		unresolved = append(unresolved, sid)
+	}
+	if len(unresolved) == len(seen) {
+		// Nothing improved: leave the stored paper untouched.
+		return nil, fmt.Errorf("没有成功修复指定题位: %s", strings.Join(unresolved, ", "))
 	}
 	paper.Questions = orderQuestionsBySpec(paper.Questions, paper.SpecTable.Entries)
 	paper.TotalScore = sumPaperQuestionScores(paper.Questions)
@@ -336,7 +383,13 @@ func (a *app) repairStoredPaper(specIDs []string) (*RepairOutput, error) {
 	if _, err := a.assemblePaper(*paper); err != nil {
 		return nil, err
 	}
-	return &RepairOutput{Paper: *paper, Rounds: 1, Validation: val}, nil
+	out := &RepairOutput{Paper: *paper, Rounds: 1, Validation: val}
+	if len(unresolved) > 0 {
+		// Report the successful repairs together with the slots that still need
+		// a working provider or manual review.
+		return out, fmt.Errorf("以下题位未能修复，仍为待人工处理: %s", strings.Join(unresolved, ", "))
+	}
+	return out, nil
 }
 
 // --- Stage [7]: 装配 ---
@@ -346,6 +399,9 @@ func (a *app) assemblePaper(paper models.ExamPaper) (*assembler.AssembleOutput, 
 	if err := a.storageReady(); err != nil {
 		return nil, err
 	}
+	// Normalize before rendering so the persisted paper and the printable
+	// document carry the same repaired content.
+	paper = assembler.NormalizePaper(paper)
 	out, err := a.assembler.Assemble(a.ctx, paper)
 	if err != nil {
 		return nil, err

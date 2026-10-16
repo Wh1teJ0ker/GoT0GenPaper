@@ -62,18 +62,18 @@ output_dir = "./output"
 templates = "./templates"
 
 [providers]
-active_id = "glm-local"
+active_id = "local-glm-5.3-flash"
 
 [[providers.providers]]
-id = "glm-local"
-name = "Local GLM 5.2"
-base_url = "http://127.0.0.1:3001"
+id = "local-glm-5.3-flash"
+name = "Local GLM 5.3 Flash (8792)"
+base_url = "http://localhost:8792/"
 api_key = ""
-default_model = "glm-5.2"
+default_model = "glm-5.3-flash"
 enabled = true
 ```
 
-远程供应商只需要把 `base_url`、`api_key` 和模型名换成自己的值。`config.toml` 含有密钥，只保存在本机，不要提交到仓库。
+当前示例只保留本地 `http://localhost:8792/` 的 `glm-5.3-flash`。如果本地代理启用了鉴权，再填写 `api_key`。`config.toml` 只保存在本机，不要提交到仓库。
 
 ### 3. 编译并自检
 
@@ -182,32 +182,15 @@ make build
 
 ## 供应商和模型管理
 
-项目使用 TOML 管理多个供应商，`active_id` 决定当前使用的供应商。
+当前运行配置只保留本地 GLM 供应商，`active_id` 指向它；不需要在配置中保留其他供应商。
 
 查看、切换和检查供应商：
 
 ```bash
 ./bin/got0genpaper config list
 ./bin/got0genpaper config show
-./bin/got0genpaper config use glm-local
-./bin/got0genpaper test-provider --provider glm-local
-```
-
-添加一个 OpenAI 兼容供应商：
-
-```bash
-./bin/got0genpaper config add \
-  --id deepseek \
-  --name DeepSeek \
-  --base-url https://api.deepseek.com \
-  --model deepseek-chat
-```
-
-添加后，在 `config.toml` 中补充它的 `api_key`，或者临时通过环境变量提供：
-
-```bash
-NEWAPI_API_KEY="$PAPER_LLM_KEY" \
-  ./bin/got0genpaper test-provider --provider deepseek
+./bin/got0genpaper config use local-glm-5.3-flash
+./bin/got0genpaper test-provider --provider local-glm-5.3-flash
 ```
 
 也可以临时指定配置文件：
@@ -234,7 +217,7 @@ make version                            # 查看版本
 make test                               # 运行测试
 make test-race                          # 运行竞态检测
 make test-integration                   # 显式运行 3 道题的离线完整流水线
-make test-corpus                        # 显式解析并编排 bundled 历年题库
+make test-corpus                        # 显式解析、编排并离线跑通全科完整流水线
 make test-output-audit                  # 显式审计 output/live 中的持久化产物
 make vet                                # 静态检查
 make check                              # 格式、依赖、测试、vet、构建
@@ -247,7 +230,7 @@ make pdf                                # 编译 output/exam.tex
 ./bin/got0genpaper artifacts             # 查看生成产物
 ```
 
-默认 `make test` / CI 测试只使用内存夹具，验证配额、编排、校验、修复、配置和存储契约；不会调用 LLM、解析完整历年题库或生成整套试卷。需要验证完整阶段时使用 `make test-integration`，需要检查真实题库时使用 `make test-corpus`，两者都不会访问真实 LLM。
+默认 `make test` / CI 测试只使用内存夹具，验证配额、编排、校验、修复、配置和存储契约；不会调用 LLM、解析完整历年题库或生成整套试卷。需要验证完整阶段时使用 `make test-integration`，需要检查真实题库时使用 `make test-corpus`，两者都不会访问真实 LLM。`make test-corpus` 会对全部六个科目跑通 parse → compose → generate → validate/repair → assemble；其中 generate 阶段因无可用 LLM 会退化为 `needs_review` 占位题面，因此它验证的是结构与组卷契约，不是题面质量。
 
 ## 出问题时先看哪里
 

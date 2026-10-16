@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	templateMu     sync.RWMutex
-	templateDir    = defaultTemplateDir()
-	latexTemplates *texttemplate.Template
+	templateMu           sync.RWMutex
+	templateDir          = defaultTemplateDir()
+	latexTemplates       *texttemplate.Template
+	verbatimBlockPattern = regexp.MustCompile(`(?s)\\begin\{verbatim\}.*?\\end\{verbatim\}`)
 )
 
 // requiredTemplateNames is the contract of the external template directory.
@@ -141,6 +142,8 @@ type ExamMeta struct {
 
 // escapeLaTeX escapes text outside math segments while retaining math markup.
 func escapeLaTeX(s string) string {
+	var verbatimBlocks []string
+	s, verbatimBlocks = protectVerbatimBlocks(s)
 	s = normalizeTeXControlCharacters(s)
 	s = normalizePreEscapedSpecialCharacters(s)
 	s = normalizeCasesNewlineEscapes(s)
@@ -174,7 +177,7 @@ func escapeLaTeX(s string) string {
 				b.WriteRune(r)
 			}
 		}
-		return b.String()
+		return restoreVerbatimBlocks(b.String(), verbatimBlocks)
 	}
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
@@ -319,7 +322,24 @@ func escapeLaTeX(s string) string {
 			b.WriteRune(r)
 		}
 	}
-	return b.String()
+	return restoreVerbatimBlocks(b.String(), verbatimBlocks)
+}
+
+func protectVerbatimBlocks(s string) (string, []string) {
+	var blocks []string
+	protected := verbatimBlockPattern.ReplaceAllStringFunc(s, func(block string) string {
+		blocks = append(blocks, block)
+		return fmt.Sprintf("GOT0GENPAPERVERBATIMBLOCK%04dEND", len(blocks)-1)
+	})
+	return protected, blocks
+}
+
+func restoreVerbatimBlocks(s string, blocks []string) string {
+	for i, block := range blocks {
+		marker := fmt.Sprintf("GOT0GENPAPERVERBATIMBLOCK%04dEND", i)
+		s = strings.ReplaceAll(s, marker, block)
+	}
+	return s
 }
 
 // normalizeLongTextUnderlines prevents generated translation passages from
@@ -356,17 +376,21 @@ func normalizeLongTextUnderlines(s string) string {
 // incomplete (escaped alignment markers, row breaks before percent signs, or
 // a float at the end of the document); preserving it verbatim can make XeTeX
 // fail with an unrelated prevdepth error. Cell contents remain visible.
+// Bare tabular blocks — not wrapped in a table float, as produced by English
+// chart-prompt questions — are flattened the same way; left intact, the
+// generic escaper would escape their & separators and collapse the chart into
+// one literal "&"-riddled line.
 func normalizeGeneratedTables(s string) string {
 	const begin = `\begin{table}`
 	const endMarker = `\end{table}`
 	for {
 		start := strings.Index(s, begin)
 		if start < 0 {
-			return s
+			return normalizeBareTabular(s)
 		}
 		relativeEnd := strings.Index(s[start:], endMarker)
 		if relativeEnd < 0 {
-			return s
+			return normalizeBareTabular(s)
 		}
 		end := start + relativeEnd + len(endMarker)
 		block := s[start:end]
@@ -381,6 +405,53 @@ func normalizeGeneratedTables(s string) string {
 		// A source row may contain a single escaped percent after the row
 		// separator has been flattened. Remove that source escape here so the
 		// normal LaTeX escaper adds exactly one, not two.
+		block = regexp.MustCompile(`\\+%`).ReplaceAllString(block, "%")
+		block = regexp.MustCompile(`\\+\s*$`).ReplaceAllString(block, "")
+		block = strings.Join(strings.Fields(block), " ")
+		if block == "" {
+			block = "（图表数据见题面）"
+		} else {
+			block = "Chart data: " + block
+		}
+		s = s[:start] + block + s[end:]
+	}
+}
+
+// normalizeBareTabular flattens tabular environments that a model emitted
+// without a surrounding table float. It applies the same cell-preserving
+// flattening as the table path; a bare block that merely wraps a math array
+// (the determinants and matrices math answers legitimately produce) is left
+// untouched because arrays carry row semantics the text cannot.
+func normalizeBareTabular(s string) string {
+	const begin = `\begin{tabular}`
+	const endMarker = `\end{tabular}`
+	for {
+		start := strings.Index(s, begin)
+		if start < 0 {
+			return s
+		}
+		relativeEnd := strings.Index(s[start:], endMarker)
+		if relativeEnd < 0 {
+			return s
+		}
+		end := start + relativeEnd + len(endMarker)
+		// Extend the region over an optional \begin{center} wrapper so the
+		// flattened chart does not strand a center environment around it.
+		if centerBegin := `\begin{center}`; strings.HasSuffix(s[:start], centerBegin) {
+			start -= len(centerBegin)
+		}
+		if centerEnd := `\end{center}`; strings.HasPrefix(s[end:], centerEnd) {
+			end += len(centerEnd)
+		}
+		block := s[start:end]
+		block = regexp.MustCompile(`\\begin\{tabular\}\{[^{}]*\}|\\end\{tabular\}`).ReplaceAllString(block, "")
+		block = strings.ReplaceAll(block, `\centering`, "")
+		block = strings.ReplaceAll(block, `\begin{center}`, "")
+		block = strings.ReplaceAll(block, `\end{center}`, "")
+		block = strings.ReplaceAll(block, `\hline`, "")
+		block = strings.ReplaceAll(block, `\&`, " / ")
+		block = strings.ReplaceAll(block, "&", " / ")
+		block = strings.ReplaceAll(block, `\\`, "; ")
 		block = regexp.MustCompile(`\\+%`).ReplaceAllString(block, "%")
 		block = regexp.MustCompile(`\\+\s*$`).ReplaceAllString(block, "")
 		block = strings.Join(strings.Fields(block), " ")
@@ -747,6 +818,8 @@ func renderOptions(options []string) string {
 
 // CleanMarkdownStem removes Markdown wrappers and safely folds flattened cells.
 func CleanMarkdownStem(s string) string {
+	var verbatimBlocks []string
+	s, verbatimBlocks = protectVerbatimBlocks(s)
 	lines := strings.Split(s, "\n")
 	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -760,6 +833,7 @@ func CleanMarkdownStem(s string) string {
 	var fragments []string
 	previousFragment := false
 	inMath := false
+	inVerbatim := false
 	flush := func() {
 		if len(fragments) > 0 {
 			out = append(out, strings.Join(fragments, "  "))
@@ -768,6 +842,20 @@ func CleanMarkdownStem(s string) string {
 	}
 	for _, line := range kept {
 		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, `\begin{verbatim}`) {
+			flush()
+			out = append(out, line)
+			previousFragment = false
+			inVerbatim = !strings.Contains(trimmed, `\end{verbatim}`)
+			continue
+		}
+		if inVerbatim {
+			out = append(out, line)
+			if strings.Contains(trimmed, `\end{verbatim}`) {
+				inVerbatim = false
+			}
+			continue
+		}
 		if strings.Contains(trimmed, `\[`) {
 			inMath = true
 		}
@@ -804,7 +892,7 @@ func CleanMarkdownStem(s string) string {
 		}
 		normalized.WriteByte(result[i])
 	}
-	return strings.TrimSpace(normalized.String())
+	return restoreVerbatimBlocks(strings.TrimSpace(normalized.String()), verbatimBlocks)
 }
 
 // isKnownNCommand distinguishes a literal JSON-style "\\nWord" newline from

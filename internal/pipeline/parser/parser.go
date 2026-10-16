@@ -32,12 +32,13 @@ import (
 
 // Parser orchestrates the real-exam analysis pipeline.
 type Parser struct {
-	LLM *llm.Client
+	LLM          *llm.Client
+	DefaultModel string
 }
 
 // New creates a Parser.
 func New(llmClient *llm.Client) *Parser {
-	return &Parser{LLM: llmClient}
+	return &Parser{LLM: llmClient, DefaultModel: "deepseek-chat"}
 }
 
 // ParseResult is the output of Stage [1].
@@ -117,8 +118,9 @@ var (
 	reAnswerFullParen = regexp.MustCompile(`(?m)^\*\*（(\d+)）(.+?)\*\*`)
 	// Half-width close-paren bare text: "**46) Chinese text**" (E1 2013).
 	reAnswerHalfParen = regexp.MustCompile(`(?m)^\*\*(\d+)\)\s*(.+?)\s*\*\*$`)
-	// Tags: 【标签】知识点1,知识点2 (may or may not be bold)
-	reTags = regexp.MustCompile(`【标签】\s*([^\n*]+?)(?:\*\*|\s|$)`)
+	// Tags: 【标签】知识点1,知识点2 (may or may not be bold; the marker itself
+	// may also carry bold markers on both sides, as in **【标签】** 栈).
+	reTags = regexp.MustCompile(`【标签】\*{0,2}\s*([^\n*]+?)(?:\*\*|\s|$)`)
 	// Explanation boundary: **【解析】** or **【解答】**
 	reExplanation = regexp.MustCompile(`\*\*【(?:解析|解答)】\*\*`)
 	// Score in text: (4 分) or (10分) or (15 points) or (20 Points), supports
@@ -165,7 +167,14 @@ func (p *Parser) Parse(ctx context.Context, source string) (*ParseResult, error)
 			return nil, fmt.Errorf("annotate question %d: %w", i, err)
 		}
 		questions[i] = annotated
-		result.IRTParams[annotated.ID] = annotated.Difficulty
+	}
+
+	// Historical corpora carry no difficulty labels. Replace the flat default
+	// with a corpus-relative estimate so composition can build a paper whose
+	// difficulty histogram matches the blueprint.
+	questions = AssignRelativeDifficulty(questions)
+	for i := range questions {
+		result.IRTParams[questions[i].ID] = questions[i].Difficulty
 	}
 
 	result.Questions = questions
@@ -810,6 +819,9 @@ func buildQuestion(baseFile, fullPath, subject, subjectCategory, section, catego
 
 	// Extract knowledge-point tags.
 	points := extractTags(body)
+	if subject == "408" {
+		points = add408Discipline(points, category)
+	}
 	if len(points) == 0 && isEnglishSubject(subject) {
 		points = englishQuestionPoints(subject, section, category, qNum)
 	}
@@ -869,6 +881,26 @@ func buildQuestion(baseFile, fullPath, subject, subjectCategory, section, catego
 		Options:     options,
 		TemplateKey: tplKey,
 	}
+}
+
+func add408Discipline(points []string, category string) []string {
+	canonical, ok := models.Canonical408Discipline(category)
+	if !ok {
+		return points
+	}
+	category = canonical
+	if len(points) > 0 && strings.TrimSpace(points[0]) == category {
+		return points
+	}
+	if len(points) > 0 {
+		if first, ok := models.Canonical408Discipline(points[0]); ok && first == category {
+			return points
+		}
+	}
+	result := make([]string, 0, len(points)+1)
+	result = append(result, category)
+	result = append(result, points...)
+	return result
 }
 
 func isEnglishSubject(subject string) bool {
@@ -948,6 +980,21 @@ func englishQuestionType(subject, section, category string, fallback models.Ques
 	return fallback
 }
 
+// englishTextLabelPattern matches the Part A text headings. The bundled corpus
+// writes both "Text 2" and "Text2" for the same passage; without one canonical
+// form the two spellings become separate composer candidates and one article
+// ends up occupying two question slots.
+var englishTextLabelPattern = regexp.MustCompile(`(?i)^text\s*([0-9]+)$`)
+
+// canonicalEnglishTextLabel normalises a Part A text heading to "Text N".
+func canonicalEnglishTextLabel(category string) string {
+	trimmed := strings.TrimSpace(category)
+	if match := englishTextLabelPattern.FindStringSubmatch(trimmed); len(match) == 2 {
+		return "Text " + match[1]
+	}
+	return trimmed
+}
+
 func englishQuestionPoints(subject, section, category string, qNum int) []string {
 	sectionLower := strings.ToLower(strings.TrimSpace(section))
 	categoryLower := strings.ToLower(strings.TrimSpace(category))
@@ -960,7 +1007,7 @@ func englishQuestionPoints(subject, section, category string, qNum int) []string
 	case strings.Contains(sectionLower, "阅读") && strings.Contains(categoryLower, "part b"):
 		return []string{subject, "阅读理解", "Part B", "人物观点匹配", position}
 	case strings.Contains(sectionLower, "阅读"):
-		return []string{subject, "阅读理解", "Part A", category, position}
+		return []string{subject, "阅读理解", "Part A", canonicalEnglishTextLabel(category), position}
 	case strings.Contains(sectionLower, "写作") && strings.Contains(categoryLower, "part a"):
 		return []string{subject, "写作", "应用文", position}
 	case strings.Contains(sectionLower, "写作"):
@@ -1335,10 +1382,32 @@ func (p *Parser) Annotate(ctx context.Context, q models.PastQuestion) (models.Pa
 		if !hasTags {
 			q.Points = politicsKnowledgePoints(strings.Join([]string{q.Stem, q.Answer, strings.Join(q.Options, "\n")}, "\n"))
 		}
+		// The political-theory corpus carries no difficulty labels either; this
+		// is a flat default, so keep the confidence at the estimate level and let
+		// AssignRelativeDifficulty spread the corpus across bands.
 		q.Difficulty = 0.55
-		q.DifficultyConfidence = 0.5
+		q.DifficultyConfidence = 0.3
 		if q.Cognitive == "" {
 			q.Cognitive = models.CogAnalyze
+		}
+		if q.TemplateKey == "" {
+			q.TemplateKey = fmt.Sprintf("%s_%s", q.Type, q.Points[0])
+		}
+		return q, nil
+	}
+
+	if hasTags {
+		// Bundled corpora already carry explicit syllabus labels. Avoid an
+		// unnecessary serial LLM call for every historical question just to
+		// estimate difficulty and cognitive level; those values are soft priors.
+		if q.Difficulty <= 0 || q.Difficulty > 1 {
+			q.Difficulty = 0.5
+		}
+		if q.DifficultyConfidence <= 0 || q.DifficultyConfidence > 1 {
+			q.DifficultyConfidence = 0.3
+		}
+		if q.Cognitive == "" {
+			q.Cognitive = models.CogApply
 		}
 		if q.TemplateKey == "" {
 			q.TemplateKey = fmt.Sprintf("%s_%s", q.Type, q.Points[0])
@@ -1431,6 +1500,9 @@ func (p *Parser) Annotate(ctx context.Context, q models.PastQuestion) (models.Pa
 
 // bestModel returns the parser's preferred model name.
 func (p *Parser) bestModel() string {
+	if strings.TrimSpace(p.DefaultModel) != "" {
+		return p.DefaultModel
+	}
 	return "deepseek-chat"
 }
 

@@ -6,6 +6,20 @@ import (
 	"testing"
 )
 
+func TestDefaultUsesOnlyLocalGLMProvider(t *testing.T) {
+	cfg := Default()
+	if len(cfg.Providers.Providers) != 1 {
+		t.Fatalf("default provider count = %d, want 1", len(cfg.Providers.Providers))
+	}
+	p := cfg.ActiveProvider()
+	if p == nil {
+		t.Fatal("default active provider is nil")
+	}
+	if p.BaseURL != "http://localhost:8792/" || p.DefaultModel != "glm-5.3-flash" {
+		t.Fatalf("default provider = %q / %q, want local GLM 5.3 Flash", p.BaseURL, p.DefaultModel)
+	}
+}
+
 func TestResolvePathsUsesConfigDirectory(t *testing.T) {
 	cfg := Default()
 	cfg.Paths = PathsConfig{

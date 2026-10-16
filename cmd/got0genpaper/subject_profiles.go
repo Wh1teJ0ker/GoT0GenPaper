@@ -17,27 +17,54 @@ import (
 // checked against the knowledge-point graph; historical questions alone are
 // not evidence that the complete syllabus is covered.
 type SubjectProfile struct {
-	Key                  string
-	Label                string
-	Source               string
-	TotalScore           float64
-	NumQuestions         int
-	TypeQuota            map[models.QuestionType]float64
-	TypeCountQuota       map[models.QuestionType]int
-	DisciplineQuota      map[string]map[models.QuestionType]float64
-	DisciplineCountQuota map[string]map[models.QuestionType]int
-	DisciplineOrder      []string
-	ExamFiles            int
-	ParsedQuestions      int
-	DataAvailable        bool
-	SyllabusStatus       string
-	SyllabusVerified     bool
-	SyllabusNote         string
+	Key                    string
+	Label                  string
+	Source                 string
+	TotalScore             float64
+	NumQuestions           int
+	TypeQuota              map[models.QuestionType]float64
+	TypeCountQuota         map[models.QuestionType]int
+	DisciplineQuota        map[string]map[models.QuestionType]float64
+	DisciplineCountQuota   map[string]map[models.QuestionType]int
+	DisciplineScorePattern map[string]map[models.QuestionType][]float64
+	DisciplineOrder        []string
+	ExamFiles              int
+	ParsedQuestions        int
+	DataAvailable          bool
+	SyllabusStatus         string
+	SyllabusVerified       bool
+	SyllabusNote           string
 }
 
 var selectableSubjects = []SubjectProfile{
 	{Key: "408", Label: "408", Source: filepath.Join("exams", "csgraduates", "408"), TotalScore: 150, NumQuestions: 47,
-		TypeQuota: map[models.QuestionType]float64{models.TypeChoice: 80, models.TypeMajor: 70}, ExamFiles: 18, ParsedQuestions: 846, DataAvailable: true,
+		TypeQuota:      map[models.QuestionType]float64{models.TypeChoice: 80, models.TypeMajor: 70},
+		TypeCountQuota: map[models.QuestionType]int{models.TypeChoice: 40, models.TypeMajor: 7},
+		// Official 2026 layout: 40 单选 (数据结构 11 / 组成 11 / 操作系统 10 /
+		// 网络 8) and 7 综合应用题 (2/2/2/1). The published score split is
+		// 45/45/35/25; the bundled files record every composite question as 10
+		// points, so the per-question score patterns below restore the official
+		// composite values (13+10, 10+13, 7+8, 9).
+		DisciplineQuota: map[string]map[models.QuestionType]float64{
+			"数据结构":  {models.TypeChoice: 22, models.TypeMajor: 23},
+			"组成原理":  {models.TypeChoice: 22, models.TypeMajor: 23},
+			"操作系统":  {models.TypeChoice: 20, models.TypeMajor: 15},
+			"计算机网络": {models.TypeChoice: 16, models.TypeMajor: 9},
+		},
+		DisciplineCountQuota: map[string]map[models.QuestionType]int{
+			"数据结构":  {models.TypeChoice: 11, models.TypeMajor: 2},
+			"组成原理":  {models.TypeChoice: 11, models.TypeMajor: 2},
+			"操作系统":  {models.TypeChoice: 10, models.TypeMajor: 2},
+			"计算机网络": {models.TypeChoice: 8, models.TypeMajor: 1},
+		},
+		DisciplineScorePattern: map[string]map[models.QuestionType][]float64{
+			"数据结构":  {models.TypeMajor: {13, 10}},
+			"组成原理":  {models.TypeMajor: {10, 13}},
+			"操作系统":  {models.TypeMajor: {7, 8}},
+			"计算机网络": {models.TypeMajor: {9}},
+		},
+		DisciplineOrder: []string{"数据结构", "组成原理", "操作系统", "计算机网络"},
+		ExamFiles:       18, ParsedQuestions: 846, DataAvailable: true,
 		SyllabusStatus: "结构已核验", SyllabusNote: "已抓取 2026 版 408 公开考纲摘要；完整官方出版物未纳入项目"},
 	{Key: "math1", Label: "数学一", Source: filepath.Join("exams", "csgraduates", "math", "math1"), TotalScore: 150, NumQuestions: 22,
 		TypeQuota: map[models.QuestionType]float64{models.TypeChoice: 50, models.TypeFillBlank: 30, models.TypeMajor: 70}, TypeCountQuota: map[models.QuestionType]int{models.TypeChoice: 10, models.TypeFillBlank: 6, models.TypeMajor: 6}, ExamFiles: 19, ParsedQuestions: 431, DataAvailable: true,
@@ -73,6 +100,7 @@ func subjectProfile(subject string) (SubjectProfile, bool) {
 			p.TypeCountQuota = cloneTypeCountQuota(p.TypeCountQuota)
 			p.DisciplineQuota = cloneDisciplineQuota(p.DisciplineQuota)
 			p.DisciplineCountQuota = cloneDisciplineCountQuota(p.DisciplineCountQuota)
+			p.DisciplineScorePattern = cloneDisciplineScorePattern(p.DisciplineScorePattern)
 			p.DisciplineOrder = append([]string(nil), p.DisciplineOrder...)
 			return p, true
 		}
@@ -108,6 +136,21 @@ func cloneDisciplineCountQuota(src map[string]map[models.QuestionType]int) map[s
 	dst := make(map[string]map[models.QuestionType]int, len(src))
 	for discipline, quota := range src {
 		dst[discipline] = cloneTypeCountQuota(quota)
+	}
+	return dst
+}
+
+func cloneDisciplineScorePattern(src map[string]map[models.QuestionType][]float64) map[string]map[models.QuestionType][]float64 {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]map[models.QuestionType][]float64, len(src))
+	for discipline, patterns := range src {
+		inner := make(map[models.QuestionType][]float64, len(patterns))
+		for questionType, pattern := range patterns {
+			inner[questionType] = append([]float64(nil), pattern...)
+		}
+		dst[discipline] = inner
 	}
 	return dst
 }
@@ -163,20 +206,21 @@ func blueprintForSubjectDifficulty(subject, preset, histogram, counts string) (o
 		return orchestrator.Blueprint{}, err
 	}
 	return orchestrator.Blueprint{
-		Subject:               p.Label,
-		TotalScore:            p.TotalScore,
-		TypeQuota:             cloneTypeQuota(p.TypeQuota),
-		TypeCountQuota:        cloneTypeCountQuota(p.TypeCountQuota),
-		DisciplineQuota:       cloneDisciplineQuota(p.DisciplineQuota),
-		DisciplineCountQuota:  cloneDisciplineCountQuota(p.DisciplineCountQuota),
-		DisciplineOrder:       append([]string(nil), p.DisciplineOrder...),
-		CoverageFloor:         map[string]float64{},
-		BloomQuota:            map[models.CognitiveLevel]int{},
-		DiffHist:              diffHist,
-		DiffCountQuota:        diffCounts,
-		DifficultyCountStrict: strictDifficulty,
-		UsageCap:              map[string]int{},
-		NumQuestions:          p.NumQuestions,
+		Subject:                p.Label,
+		TotalScore:             p.TotalScore,
+		TypeQuota:              cloneTypeQuota(p.TypeQuota),
+		TypeCountQuota:         cloneTypeCountQuota(p.TypeCountQuota),
+		DisciplineQuota:        cloneDisciplineQuota(p.DisciplineQuota),
+		DisciplineCountQuota:   cloneDisciplineCountQuota(p.DisciplineCountQuota),
+		DisciplineScorePattern: cloneDisciplineScorePattern(p.DisciplineScorePattern),
+		DisciplineOrder:        append([]string(nil), p.DisciplineOrder...),
+		CoverageFloor:          map[string]float64{},
+		BloomQuota:             map[models.CognitiveLevel]int{},
+		DiffHist:               diffHist,
+		DiffCountQuota:         diffCounts,
+		DifficultyCountStrict:  strictDifficulty,
+		UsageCap:               map[string]int{},
+		NumQuestions:           p.NumQuestions,
 	}, nil
 }
 

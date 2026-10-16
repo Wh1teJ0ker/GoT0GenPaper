@@ -11,6 +11,7 @@ import (
 
 	"GoT0GenPaper/internal/latex"
 	"GoT0GenPaper/internal/models"
+	"GoT0GenPaper/internal/pipeline/generator"
 	"GoT0GenPaper/internal/pipeline/quality"
 	"GoT0GenPaper/internal/pipeline/validator"
 )
@@ -28,8 +29,12 @@ func ValidateReady(paper models.ExamPaper) error {
 	if len(paper.Questions) == 0 {
 		return fmt.Errorf("试卷没有题目，不能编译正式 PDF")
 	}
-	if issues := validator.English2StructureIssues(paper); len(issues) > 0 {
-		return fmt.Errorf("英语二 2026 结构校验失败: %s", strings.Join(issues, "；"))
+	if issues := validator.EnglishStructureIssues(paper); len(issues) > 0 {
+		label := "英语二"
+		if models.EnglishSubjectTag(paper.Subject) == "english1" {
+			label = "英语一"
+		}
+		return fmt.Errorf("%s结构校验失败: %s", label, strings.Join(issues, "；"))
 	}
 	questions := make(map[string]models.GeneratedQuestion, len(paper.Questions))
 	for i, q := range paper.Questions {
@@ -102,8 +107,29 @@ var ExamFooter = latex.FooterBranding{Right: "GoT0GenPaper"}
 // Assemble renders the paper as a single LaTeX exam document.
 func (a *Assembler) Assemble(ctx context.Context, paper models.ExamPaper) (*AssembleOutput, error) {
 	out := &AssembleOutput{}
-	out.ExamLaTeX = a.renderExam(paper)
+	out.ExamLaTeX = a.renderExam(NormalizePaper(paper))
 	return out, nil
+}
+
+// NormalizePaper repairs known LaTeX and answer-format defects before
+// rendering. Papers stored by older versions are fixed here as well, so
+// reassembling or recompiling an existing paper yields a clean document without
+// regeneration; callers that persist the result also heal the stored JSON.
+func NormalizePaper(paper models.ExamPaper) models.ExamPaper {
+	paper.Questions = append([]models.GeneratedQuestion(nil), paper.Questions...)
+	for i := range paper.Questions {
+		q := &paper.Questions[i]
+		q.Stem = generator.NormalizeGeneratedLaTeX(q.Stem)
+		q.Answer = generator.SyncAnswerSummary(generator.NormalizeGeneratedLaTeX(q.Answer))
+		q.SharedMaterial = generator.NormalizeGeneratedLaTeX(q.SharedMaterial)
+		for j := range q.Options {
+			q.Options[j] = generator.NormalizeGeneratedLaTeX(q.Options[j])
+		}
+		for j := range q.SharedOptions {
+			q.SharedOptions[j] = generator.NormalizeGeneratedLaTeX(q.SharedOptions[j])
+		}
+	}
+	return paper
 }
 
 // sectionGroup is one contiguous run of same-type questions.
@@ -284,7 +310,7 @@ func (a *Assembler) renderExam(paper models.ExamPaper) string {
 		renderedMaterials := make(map[string]bool)
 		for i, q := range g.Questions {
 			if q.GroupID != "" && !renderedMaterials[q.GroupID] {
-				if direction := english2GroupDirection(q); direction != "" {
+				if direction := englishGroupDirection(q); direction != "" {
 					sec.Questions = append(sec.Questions, latex.ExamText(direction))
 				}
 				material := latex.CleanMarkdownStem(q.SharedMaterial)
@@ -300,14 +326,14 @@ func (a *Assembler) renderExam(paper models.ExamPaper) string {
 			if stem == "" {
 				stem = "% TODO: 题面缺失"
 			}
-			if q.GroupID == "english2-cloze" {
+			if strings.HasSuffix(q.GroupID, "-cloze") {
 				sec.Questions = append(sec.Questions, latex.ClozeQuestion(g.Numbering[i], q.Options))
 				continue
 			}
 			switch q.Type {
 			case models.TypeChoice, models.TypeMultiChoice:
 				opts := make([]string, 0, len(q.Options))
-				if !models.IsEnglish2PartB(q.Points) {
+				if !models.IsEnglishPartB(q.Points) {
 					for _, o := range q.Options {
 						opts = append(opts, latex.CleanMarkdownStem(o))
 					}
@@ -329,31 +355,62 @@ func (a *Assembler) renderExam(paper models.ExamPaper) string {
 	return latex.ExamPaper(examMeta(paper), sections, &cover, ExamFooter)
 }
 
-func english2GroupDirection(question models.GeneratedQuestion) string {
-	if len(question.Points) == 0 {
-		return ""
-	}
-	if !strings.EqualFold(strings.TrimSpace(question.Points[0]), "english2") &&
-		!strings.EqualFold(strings.TrimSpace(question.Points[0]), "英语二") {
+func englishGroupDirection(question models.GeneratedQuestion) string {
+	tag := models.EnglishSubjectTag(subjectOf(question.Points))
+	if tag == "" {
 		return ""
 	}
 	position, ok := models.EnglishQuestionPosition(question.Points)
 	if !ok {
 		return ""
 	}
-	switch question.GroupID {
-	case "english2-cloze":
+	switch englishGroupKindOf(question.GroupID) {
+	case "cloze":
 		return "Directions: Read the following text. Choose the best word(s) for each numbered blank and mark A, B, C or D on the ANSWER SHEET. (10 points)"
-	case "english2-reading-1":
+	case "reading-1":
 		if position == 21 {
 			return "Directions: Read the following four texts. Answer the questions below each text by choosing A, B, C or D. Mark your answers on the ANSWER SHEET. (40 points)"
 		}
-	case "english2-part-b":
+	case "part-b":
+		if tag == "english1" {
+			if position == 41 {
+				return "Directions: Read the following text and choose the best sentence from the list A-G for each numbered blank (41-45). There are two extra sentences which you do not need to use. Mark your answers on the ANSWER SHEET. (10 points)"
+			}
+			return ""
+		}
 		if position == 41 {
 			return "Directions: Choose the best statement from the list A-G for each numbered name (41-45). There are two extra statements which you do not need to use. Mark your answers on the ANSWER SHEET. (10 points)"
 		}
+	case "translation":
+		if position == 46 {
+			return "Directions: Read the following text carefully and then translate the underlined segments into Chinese. Write your answers on the ANSWER SHEET. (10 points)"
+		}
 	}
 	return ""
+}
+
+// subjectOf recovers the subject tag from a knowledge-point path.
+func subjectOf(points []string) string {
+	if len(points) == 0 {
+		return ""
+	}
+	return points[0]
+}
+
+// englishGroupKindOf classifies a group id by its suffix.
+func englishGroupKindOf(groupID string) string {
+	switch {
+	case strings.HasSuffix(groupID, "-cloze"):
+		return "cloze"
+	case strings.HasSuffix(groupID, "-reading-1"):
+		return "reading-1"
+	case strings.HasSuffix(groupID, "-part-b"):
+		return "part-b"
+	case strings.HasSuffix(groupID, "-translation"):
+		return "translation"
+	default:
+		return "reading"
+	}
 }
 
 func formatQuestionScore(score float64) string {

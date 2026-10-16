@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"GoT0GenPaper/internal/models"
 	"GoT0GenPaper/internal/pipeline/orchestrator"
+	"GoT0GenPaper/internal/pipeline/parser"
 )
 
 // fixtureCandidates is deliberately small. Default tests exercise the
@@ -196,12 +198,12 @@ func TestRepairAddsMissingSpecSlot(t *testing.T) {
 	blueprint := orchestrator.Blueprint{
 		Subject: "408", TotalScore: 10,
 		DiffHist:      map[models.DifficultyBand]float64{models.BandMedium: 1},
-		CoverageFloor: map[string]float64{"point-1": 1},
+		CoverageFloor: map[string]float64{"数据结构": 1},
 	}
 	a.lastBlueprint = &blueprint
 	paper := models.ExamPaper{
 		Subject:   "408",
-		SpecTable: models.SpecTable{Subject: "408", TotalScore: 10, Entries: []models.SpecEntry{{ID: "spec_001", Type: models.TypeMajor, Points: []string{"point-1"}, DiffBand: models.BandMedium, Score: 10}}},
+		SpecTable: models.SpecTable{Subject: "408", TotalScore: 10, Entries: []models.SpecEntry{{ID: "spec_001", Type: models.TypeMajor, Points: []string{"数据结构", "线性表"}, DiffBand: models.BandMedium, Score: 10}}},
 	}
 	out, err := a.repairExamPaper(paper, 1)
 	if err != nil {
@@ -241,5 +243,171 @@ func TestRepairRegeneratesOnlyViolatedSlot(t *testing.T) {
 		if question.ID != out.Paper.Questions[i+1].ID {
 			t.Errorf("untouched question %d changed from %s to %s", i, question.ID, out.Paper.Questions[i+1].ID)
 		}
+	}
+}
+
+// TestRepairAppliesKnownRepairWithoutProvider proves the deterministic repair
+// path used when fixing an existing paper: a reviewed artifact is fixed from the
+// built-in table with no provider request, and a slot whose topic changed is
+// left to regeneration instead of receiving the wrong content.
+func TestRepairAppliesKnownRepairWithoutProvider(t *testing.T) {
+	a := newTestApp(t)
+	a.gen.LLM = nil // no provider: the generation path can only produce placeholders
+
+	blueprint := smallBlueprint()
+	a.lastBlueprint = &blueprint
+	placeholder := func(specID string, points []string, questionType models.QuestionType, score float64) models.GeneratedQuestion {
+		return models.GeneratedQuestion{
+			ID: "gen_" + specID, SpecID: specID, Type: questionType, Points: points, Score: score,
+			Status: "needs_review", Stem: "% TODO: 占位题面", Answer: "% TODO: 占位答案",
+			Warnings: []string{"LLM不可用，题面和答案是占位内容"},
+		}
+	}
+	paper := models.ExamPaper{
+		Subject: "408", TotalScore: 14,
+		SpecTable: models.SpecTable{
+			Subject: "408", TotalScore: 14,
+			Entries: []models.SpecEntry{
+				{ID: "spec_001", Index: 1, Type: models.TypeChoice, Points: []string{"数据结构", "B树", "B+树"}, Score: 2, DiffBand: models.BandMedium},
+				{ID: "spec_002", Index: 2, Type: models.TypeChoice, Points: []string{"计算机网络", "TCP", "IP模型"}, Score: 2, DiffBand: models.BandMedium},
+				{ID: "spec_003", Index: 3, Type: models.TypeMajor, Points: []string{"操作系统", "进程管理", "进程与线程"}, Score: 10, DiffBand: models.BandMedium},
+			},
+		},
+		Questions: []models.GeneratedQuestion{
+			placeholder("spec_001", []string{"数据结构", "B树", "B+树"}, models.TypeChoice, 2),
+			placeholder("spec_002", []string{"计算机网络", "TCP", "IP模型"}, models.TypeChoice, 2),
+			placeholder("spec_003", []string{"操作系统", "进程管理", "进程与线程"}, models.TypeMajor, 10),
+		},
+	}
+
+	out, err := a.repairExamPaper(paper, 1)
+	if err != nil {
+		t.Fatalf("repairExamPaper: %v", err)
+	}
+	repaired, ok := questionForSpec(&out.Paper, "spec_001")
+	if !ok {
+		t.Fatal("spec_001 disappeared from the repaired paper")
+	}
+	if repaired.Status != "ready" || !strings.Contains(repaired.Stem, "关键字数超过 2 个") ||
+		!strings.HasPrefix(repaired.Answer, "答案：D") {
+		t.Errorf("known repair was not applied: status=%q stem=%q", repaired.Status, repaired.Stem)
+	}
+	unrelated, _ := questionForSpec(&out.Paper, "spec_002")
+	if strings.Contains(unrelated.Stem, "关键字数超过 2 个") || unrelated.Status == "ready" {
+		t.Errorf("B-tree repair leaked into the TCP slot: status=%q stem=%q", unrelated.Status, unrelated.Stem)
+	}
+}
+
+// TestRepairStoredPaperKeepsSlotsWhenProviderIsDown proves a failed repair
+// never clobbers the stored paper: the slot that has a deterministic repair is
+// fixed, and the slot that would need the provider keeps its previous content
+// while the command reports it as unresolved.
+func TestRepairStoredPaperKeepsSlotsWhenProviderIsDown(t *testing.T) {
+	a := newTestApp(t)
+	a.lastParse = &parser.ParseResult{} // skip loading the corpus parse artifact
+	a.gen.LLM = nil                     // provider unavailable: only placeholders can be generated
+
+	blueprint := orchestrator.Blueprint{
+		Subject: "408", TotalScore: 4,
+		DiffHist:      map[models.DifficultyBand]float64{models.BandMedium: 1},
+		CoverageFloor: map[string]float64{"数据结构": 1},
+	}
+	if err := a.store.SaveDataJSON("blueprint", blueprint); err != nil {
+		t.Fatal(err)
+	}
+	placeholder := func(specID string, points []string) models.GeneratedQuestion {
+		return models.GeneratedQuestion{
+			ID: "gen_" + specID, SpecID: specID, Type: models.TypeChoice, Points: points, Score: 2,
+			Status: "needs_review", Stem: "% TODO: 占位题面 " + specID, Answer: "% TODO: 占位答案",
+		}
+	}
+	paper := models.ExamPaper{
+		Subject: "408", TotalScore: 4,
+		SpecTable: models.SpecTable{
+			Subject: "408", TotalScore: 4,
+			Entries: []models.SpecEntry{
+				{ID: "spec_001", Index: 1, Type: models.TypeChoice, Points: []string{"数据结构", "B树", "B+树"}, Score: 2, DiffBand: models.BandMedium},
+				{ID: "spec_002", Index: 2, Type: models.TypeChoice, Points: []string{"数据结构", "二叉树构建"}, Score: 2, DiffBand: models.BandMedium},
+			},
+		},
+		Questions: []models.GeneratedQuestion{
+			placeholder("spec_001", []string{"数据结构", "B树", "B+树"}),
+			placeholder("spec_002", []string{"数据结构", "二叉树构建"}),
+		},
+	}
+	if err := a.store.SaveOutputJSON("paper", paper); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := a.repairStoredPaper([]string{"spec_001", "spec_002"})
+	if err == nil || !strings.Contains(err.Error(), "spec_002") {
+		t.Fatalf("repairStoredPaper error = %v, want unresolved spec_002", err)
+	}
+	if out == nil {
+		t.Fatal("partial repair returned no result; the fixed slot would be invisible to the user")
+	}
+	fixed, ok := questionForSpec(&out.Paper, "spec_001")
+	if !ok || fixed.Status != "ready" || !strings.Contains(fixed.Stem, "关键字数超过 2 个") {
+		t.Errorf("spec_001 was not repaired: ok=%v status=%q stem=%q", ok, fixed.Status, fixed.Stem)
+	}
+	kept, _ := questionForSpec(&out.Paper, "spec_002")
+	if kept.Stem != "% TODO: 占位题面 spec_002" {
+		t.Errorf("spec_002 was clobbered by the failed repair: %q", kept.Stem)
+	}
+
+	var stored models.ExamPaper
+	if err := a.store.LoadJSON(a.store.OutputDir, "paper", &stored); err != nil {
+		t.Fatal(err)
+	}
+	if storedQ, _ := questionForSpec(&stored, "spec_002"); storedQ.Stem != "% TODO: 占位题面 spec_002" {
+		t.Errorf("stored spec_002 changed to %q", storedQ.Stem)
+	}
+	if storedQ, _ := questionForSpec(&stored, "spec_001"); storedQ.Status != "ready" {
+		t.Errorf("stored spec_001 was not persisted: status=%q", storedQ.Status)
+	}
+}
+
+// TestRepairIsIdempotentForReviewedSlots proves running repair twice on a slot
+// that already carries the reviewed content succeeds without touching the
+// provider: the second run reports the slot as satisfied instead of failing.
+func TestRepairIsIdempotentForReviewedSlots(t *testing.T) {
+	a := newTestApp(t)
+	a.lastParse = &parser.ParseResult{}
+	a.gen.LLM = nil // any provider call would fail the test
+
+	blueprint := orchestrator.Blueprint{
+		Subject: "408", TotalScore: 2,
+		DiffHist:      map[models.DifficultyBand]float64{models.BandMedium: 1},
+		CoverageFloor: map[string]float64{"数据结构": 1},
+	}
+	if err := a.store.SaveDataJSON("blueprint", blueprint); err != nil {
+		t.Fatal(err)
+	}
+	points := []string{"数据结构", "B树", "B+树"}
+	placeholder := models.GeneratedQuestion{
+		ID: "gen_spec_001", SpecID: "spec_001", Type: models.TypeChoice, Points: points, Score: 2,
+		Status: "needs_review", Stem: "% TODO: 占位题面", Answer: "% TODO: 占位答案",
+	}
+	paper := models.ExamPaper{
+		Subject: "408", TotalScore: 2,
+		SpecTable: models.SpecTable{Subject: "408", TotalScore: 2, Entries: []models.SpecEntry{
+			{ID: "spec_001", Index: 1, Type: models.TypeChoice, Points: points, Score: 2, DiffBand: models.BandMedium},
+		}},
+		Questions: []models.GeneratedQuestion{placeholder},
+	}
+	if err := a.store.SaveOutputJSON("paper", paper); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := a.repairStoredPaper([]string{"spec_001"}); err != nil {
+		t.Fatalf("first repair: %v", err)
+	}
+	out, err := a.repairStoredPaper([]string{"spec_001"})
+	if err != nil {
+		t.Fatalf("second repair must be a no-op success, got: %v", err)
+	}
+	got, ok := questionForSpec(&out.Paper, "spec_001")
+	if !ok || got.Status != "ready" || !strings.Contains(got.Stem, "关键字数超过 2 个") {
+		t.Errorf("reviewed content lost after re-repair: ok=%v status=%q stem=%q", ok, got.Status, got.Stem)
 	}
 }

@@ -2,5 +2,5 @@
 
 {{%else%}}
 {{%end%}}{{%end%}}{{%end%}}
-{{%define "choice_question"%}}\noindent{\bfseries {{% .Number %}}．}{{% .Stem %}}\par\vspace{0.35em}
+{{%define "choice_question"%}}\Needspace{7\baselineskip}\noindent{\bfseries {{% .Number %}}．}{{% .Stem %}}\par\vspace{0.35em}
 {{%template "choice_options" .OptionRows%}}{{%end%}}

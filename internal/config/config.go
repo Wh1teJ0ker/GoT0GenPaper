@@ -20,6 +20,22 @@ type Config struct {
 	NewAPI    NewAPIConfig    `json:"newapi,omitempty" toml:"-"`
 	Providers ProvidersConfig `json:"providers" toml:"providers"`
 	Paths     PathsConfig     `json:"paths" toml:"paths"`
+	English   EnglishConfig   `json:"english" toml:"english"`
+}
+
+// EnglishConfig controls how the English papers' passages are obtained. The
+// papers are written article-first: the passage exists before the questions do.
+type EnglishConfig struct {
+	// ArticleSource is "write" (the model writes an original article, the
+	// default) or "websearch" (search the web and use a real article's text).
+	ArticleSource string `json:"articleSource" toml:"article_source"`
+	// SearchURL is the search endpoint template; {query} is replaced with the
+	// URL-encoded query. Required for websearch.
+	SearchURL string `json:"searchUrl,omitempty" toml:"search_url,omitempty"`
+	// SearchAPIKey is sent as a bearer token to the search endpoint.
+	SearchAPIKey string `json:"searchApiKey,omitempty" toml:"search_api_key,omitempty"`
+	// SearchResults limits how many results are tried.
+	SearchResults int `json:"searchResults,omitempty" toml:"search_results,omitempty"`
 }
 
 type NewAPIConfig struct {
@@ -61,9 +77,9 @@ func Default() *Config {
 	outputDir := filepath.Join(AppDataDir(), "output")
 	templatesDir := filepath.Join(AppDataDir(), "templates")
 	provider := ProviderConfig{
-		ID: "deepseek", Name: "DeepSeek", BaseURL: "https://api.deepseek.com", Enabled: true,
-		ModelByType:  map[string]string{"choice": "deepseek-v4.1-flash", "fill_blank": "deepseek-v4.1-flash", "major": "deepseek-v4.1-flash"},
-		DefaultModel: "deepseek-v4.1-flash",
+		ID: "local-glm-5.3-flash", Name: "Local GLM 5.3 Flash (8792)", BaseURL: "http://localhost:8792/", Enabled: true,
+		ModelByType:  map[string]string{"choice": "glm-5.3-flash", "fill_blank": "glm-5.3-flash", "major": "glm-5.3-flash"},
+		DefaultModel: "glm-5.3-flash",
 	}
 	cfg := &Config{
 		Providers: ProvidersConfig{ActiveID: provider.ID, Providers: []ProviderConfig{provider}},

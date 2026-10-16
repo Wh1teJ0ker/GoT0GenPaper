@@ -303,6 +303,30 @@ func TestValidateRequiresReferenceAnswers(t *testing.T) {
 	}
 }
 
+func TestValidateChecksSelfCorrectionAndNormalizesLegacyUnits(t *testing.T) {
+	paper := models.ExamPaper{
+		Subject: "408", TotalScore: 2,
+		Questions: []models.GeneratedQuestion{{
+			ID: "q1", SpecID: "spec_001", Type: models.TypeChoice, Score: 2, Difficulty: 0.5, Status: "ready",
+			Points:  []string{"操作系统", "中断"},
+			Stem:    `某系统中断响应时间为 100\mu s，问处理器开销。`,
+			Options: []string{"A. 1", "B. 2", "C. 3", "D. 4"},
+			Answer: `答案：A。根据条件计算，选项 A 为 100\mu s。
+原选项 A 有误，应修正题面并重新设计。`,
+		}},
+	}
+	result, err := New(nil).Validate(context.Background(), paper, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ContentReady {
+		t.Fatalf("self-correcting answer passed content validation: %+v", result.ContentIssues)
+	}
+	if !strings.Contains(strings.Join(result.ContentIssues, " "), "自我纠错") {
+		t.Fatalf("self-correction issue missing: %v", result.ContentIssues)
+	}
+}
+
 func TestValidateChecksDisciplineQuotasAndOrder(t *testing.T) {
 	bp := &orchestrator.Blueprint{
 		TotalScore: 10,
@@ -357,4 +381,30 @@ func TestValidateChecksDisciplineQuotasAndOrder(t *testing.T) {
 	check("wrong balance", makePaper([]string{"高等数学", "导数"}, []string{"高等数学", "积分"}), false, "线性代数 的 choice 数量为 0")
 	check("wrong order", makePaper([]string{"线性代数", "矩阵"}, []string{"高等数学", "导数"}), false, "学科顺序不符合蓝图")
 	check("ODE is calculus", makePaper([]string{"常微分方程", "方程"}, []string{"线性代数", "矩阵"}), true, "")
+}
+
+func TestValidateChecksPerDisciplineQuestionScoreSequence(t *testing.T) {
+	bp := &orchestrator.Blueprint{
+		Subject: "408", TotalScore: 23,
+		TypeQuota:              map[models.QuestionType]float64{models.TypeMajor: 23},
+		TypeCountQuota:         map[models.QuestionType]int{models.TypeMajor: 2},
+		DisciplineQuota:        map[string]map[models.QuestionType]float64{"数据结构": {models.TypeMajor: 23}},
+		DisciplineCountQuota:   map[string]map[models.QuestionType]int{"数据结构": {models.TypeMajor: 2}},
+		DisciplineOrder:        []string{"数据结构"},
+		DisciplineScorePattern: map[string]map[models.QuestionType][]float64{"数据结构": {models.TypeMajor: {13, 10}}},
+	}
+	paper := models.ExamPaper{Subject: "408", TotalScore: 23, Questions: []models.GeneratedQuestion{
+		{ID: "q41", Type: models.TypeMajor, Score: 10, Difficulty: 0.5, Stem: "算法题题面", Answer: "算法步骤与正确性分析", Points: []string{"数据结构", "树"}},
+		{ID: "q42", Type: models.TypeMajor, Score: 13, Difficulty: 0.5, Stem: "算法题题面", Answer: "算法步骤与复杂度分析", Points: []string{"数据结构", "图"}},
+	}}
+	result, err := New(nil).Validate(context.Background(), paper, bp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StructureOK {
+		t.Fatal("reversed 408 major score sequence passed structural validation")
+	}
+	if !strings.Contains(strings.Join(result.StructureIssues, " "), "第 1 题分值为 10.0，要求 13.0") {
+		t.Fatalf("score-sequence issue missing: %v", result.StructureIssues)
+	}
 }

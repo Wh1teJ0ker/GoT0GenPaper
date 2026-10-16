@@ -85,7 +85,10 @@ func newTestApp(t *testing.T) *app {
 
 func writeExamSource(t *testing.T) string {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "exams")
+	// Mirror the bundled corpus layout: subjectFromPath resolves the subject
+	// from the csgraduates/<subject> path components, and the 408 pipeline
+	// depends on that to attach the four-course discipline labels.
+	dir := filepath.Join(t.TempDir(), "csgraduates", "408")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

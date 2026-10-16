@@ -2,12 +2,73 @@ package parser
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"GoT0GenPaper/internal/llm"
 	"GoT0GenPaper/internal/models"
 )
+
+func TestAnnotateTaggedQuestionSkipsLLM(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	p := New(llm.New(server.URL, "test-key"))
+	question, err := p.Annotate(context.Background(), models.PastQuestion{
+		ID: "408_2024_1", Subject: "408", Type: models.TypeChoice,
+		Points: []string{"数据结构", "链表"}, Score: 2, Stem: "测试题面",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("tagged question made %d LLM requests, want 0", got)
+	}
+	if question.Difficulty != 0.5 || question.DifficultyConfidence != 0.3 || question.Cognitive != models.CogApply {
+		t.Errorf("tagged question defaults = difficulty %.2f, confidence %.2f, cognitive %q", question.Difficulty, question.DifficultyConfidence, question.Cognitive)
+	}
+}
+
+func TestAnnotateMissingTagsUsesConfiguredModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request llm.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode chat request: %v", err)
+		}
+		if request.Model != "glm-5.2" {
+			t.Errorf("request model = %q, want glm-5.2", request.Model)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{
+				"content": `{"points":["数据结构","树"],"cognitive":"analyze","difficulty":0.7,"confidence":0.8}`,
+			}}},
+		})
+	}))
+	defer server.Close()
+
+	p := New(llm.New(server.URL, "test-key"))
+	p.DefaultModel = "glm-5.2"
+	question, err := p.Annotate(context.Background(), models.PastQuestion{
+		ID: "408_2024_missing_tag", Subject: "408", Type: models.TypeChoice,
+		Score: 2, Stem: "一棵具有 n 个结点的二叉树……",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(question.Points) != 2 || question.Points[1] != "树" || question.Cognitive != models.CogAnalyze {
+		t.Errorf("annotated question = points %v, cognitive %q", question.Points, question.Cognitive)
+	}
+}
 
 func TestEnglishPartCIsTranslationMajor(t *testing.T) {
 	if got := englishQuestionType("english2", "阅读理解", "Part C", models.TypeChoice); got != models.TypeMajor {
@@ -15,6 +76,54 @@ func TestEnglishPartCIsTranslationMajor(t *testing.T) {
 	}
 	if got := englishQuestionType("english2", "阅读理解", "Part B", models.TypeChoice); got != models.TypeChoice {
 		t.Fatalf("english Part B type = %s, want %s", got, models.TypeChoice)
+	}
+}
+
+func Test4082026SourcePreservesDisciplineFromCategory(t *testing.T) {
+	source := filepath.Join("..", "..", "..", "data", "exams", "csgraduates", "408", "2026.md")
+	result, err := New(nil).Parse(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[string]map[models.QuestionType]int)
+	for _, question := range result.Questions {
+		discipline := models.DisciplineFromPoints(question.Points)
+		if counts[discipline] == nil {
+			counts[discipline] = make(map[models.QuestionType]int)
+		}
+		counts[discipline][question.Type]++
+	}
+	want := map[string]map[models.QuestionType]int{
+		"数据结构":  {models.TypeChoice: 11, models.TypeMajor: 2},
+		"组成原理":  {models.TypeChoice: 11, models.TypeMajor: 2},
+		"操作系统":  {models.TypeChoice: 10, models.TypeMajor: 2},
+		"计算机网络": {models.TypeChoice: 8, models.TypeMajor: 1},
+	}
+	if len(result.Questions) != 47 {
+		t.Fatalf("parsed %d 408 questions; want 47", len(result.Questions))
+	}
+	for discipline, types := range want {
+		for questionType, count := range types {
+			if counts[discipline][questionType] != count {
+				t.Errorf("parsed %s %s count = %d; want %d", discipline, questionType, counts[discipline][questionType], count)
+			}
+		}
+	}
+}
+
+func Test408BundledCorpusTagsEveryQuestionWithItsDiscipline(t *testing.T) {
+	source := filepath.Join("..", "..", "..", "data", "exams", "csgraduates", "408")
+	result, err := New(nil).Parse(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Questions) < 800 {
+		t.Fatalf("parsed only %d questions from the 408 corpus", len(result.Questions))
+	}
+	for _, question := range result.Questions {
+		if !models.Is408Discipline(models.DisciplineFromPoints(question.Points)) {
+			t.Errorf("question %s has no valid discipline in points %v", question.ID, question.Points)
+		}
 	}
 }
 

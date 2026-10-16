@@ -177,6 +177,26 @@ k_2=0\end{cases}$`},
 	}
 }
 
+func TestCleanMarkdownStemPreservesVerbatimCode(t *testing.T) {
+	in := "\\begin{verbatim}\n#include <stdio.h>\nint global_init = 10;\nprintf(\"%s\\n\", str);\n\\end{verbatim}"
+	cleaned := CleanMarkdownStem(in)
+	code := "printf(\"%s\\n\", str);"
+	if !strings.Contains(cleaned, code) {
+		t.Fatalf("cleaning changed C string escape: %q", cleaned)
+	}
+	escaped := escapeLaTeX(cleaned)
+	for _, want := range []string{"#include <stdio.h>", "global_init = 10;", code} {
+		if !strings.Contains(escaped, want) {
+			t.Errorf("verbatim code lost %q: %q", want, escaped)
+		}
+	}
+	for _, unwanted := range []string{"\\#include", "global\\_init", "\\%s"} {
+		if strings.Contains(escaped, unwanted) {
+			t.Errorf("verbatim code was TeX-escaped (%q): %q", unwanted, escaped)
+		}
+	}
+}
+
 func TestEscapeLaTeXKeepsAllMathDelimiters(t *testing.T) {
 	cases := []string{
 		`答案 \(x^2\) 与 \[\int_0^1 x\,dx\]。`,
@@ -273,6 +293,37 @@ func TestEscapeLaTeXFlattensGeneratedTableWithoutDroppingData(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("table data %q was lost: %q", want, out)
 		}
+	}
+}
+
+// TestEscapeLaTeXFlattensBareTabularChart pins the English chart-question
+// form: a tabular block emitted directly inside the stem, with no table
+// float around it. The generic escaper would escape the & separators and
+// collapse the chart into one literal "&" line, so the flattener must claim
+// the block first. A math array (legitimate row semantics) must survive.
+func TestEscapeLaTeXFlattensBareTabularChart(t *testing.T) {
+	in := "Directions: Write an essay based on the chart below.\n" +
+		`\begin{center}\begin{tabular}{|l|c|c|c|c|}\hline\textbf{Medium} & \textbf{2020} & \textbf{2021} \\ \hline Digital reading & 25 & 32 \\ \hline Paper reading & 40 & 36 \\ \hline\end{tabular}\end{center}`
+	out := escapeLaTeX(in)
+	if strings.Contains(out, `\begin{tabular}`) || strings.Contains(out, `\begin{center}`) {
+		t.Fatalf("bare tabular environment was retained: %q", out)
+	}
+	if strings.Contains(out, `&`) {
+		t.Fatalf("& separators leaked into the flattened chart: %q", out)
+	}
+	for _, want := range []string{"Medium", "2020", "Digital reading", "25", "Paper reading", "36"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("chart data %q was lost: %q", want, out)
+		}
+	}
+
+	arrayIn := `$\left|\begin{array}{ccc}1&0&k\\k&1&0\\0&k&1\end{array}\right|=1+k^3$`
+	arrayOut := escapeLaTeX(arrayIn)
+	if !strings.Contains(arrayOut, `\begin{array}`) {
+		t.Fatalf("math array was flattened: %q", arrayOut)
+	}
+	if strings.Count(arrayOut, "&") != strings.Count(arrayIn, "&") {
+		t.Fatalf("math array & separators were re-escaped: %q", arrayOut)
 	}
 }
 
@@ -383,7 +434,7 @@ func TestExamPaperStructure(t *testing.T) {
 		"A．甲\\quad B．乙\\quad C．丙\\quad D．丁",
 		"{\\bfseries 2．}（8 分）计算下题。",
 		"\\pageref{LastPage}",
-		"\\documentclass[12pt]{ctexart}",
+		"\\documentclass[12pt,fontset=fandol]{ctexart}",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("exam paper missing %q", want)
@@ -395,6 +446,20 @@ func TestExamPaperStructure(t *testing.T) {
 	sec2 := strings.Index(doc, "二、综合应用题")
 	if q1 == -1 || sec2 == -1 || sec2 < q1 {
 		t.Errorf("section headers must interleave with questions (q1@%d, sec2@%d)", q1, sec2)
+	}
+}
+
+func TestChoiceQuestionReservesSpaceForOptions(t *testing.T) {
+	got := ChoiceQuestion(39, "题干两行。", []string{"甲", "乙", "丙", "丁"})
+	if !strings.HasPrefix(got, `\Needspace{7\baselineskip}`) {
+		t.Fatalf("choice question should reserve room to keep stem and options together, got %q", got)
+	}
+	doc := ExamPaper(ExamMeta{Subject: "408"}, []ExamSection{{
+		Spec:      SectionSpec{Title: "选择题", Detail: "第 39 题"},
+		Questions: []string{got},
+	}}, nil, FooterBranding{})
+	if !strings.Contains(doc, `\usepackage{needspace}`) {
+		t.Fatal("document preamble must load the needspace package")
 	}
 }
 
@@ -411,7 +476,7 @@ func TestExamPaperCoverDoesNotAffectBodyPagination(t *testing.T) {
 	)
 	for _, want := range []string{
 		"\\begin{titlepage}\n\\thispagestyle{empty}",
-		"\\end{titlepage}\n\\pagenumbering{arabic}\n\\setcounter{page}{1}\n\\pagestyle{fancy}",
+		"\\end{titlepage}\n\\pagenumbering{arabic}\n\\setcounter{page}{2}\n\\pagestyle{fancy}",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("cover pagination contract missing %q", want)

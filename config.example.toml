@@ -7,20 +7,31 @@ output_dir = "./output"
 templates = "./templates"
 
 [providers]
-active_id = "glm-local"
+active_id = "local-glm-5.3-flash"
 
 [[providers.providers]]
-id = "glm-local"
-name = "Local GLM 5.2"
-base_url = "http://127.0.0.1:3001"
+id = "local-glm-5.3-flash"
+name = "Local GLM 5.3 Flash (8792)"
+base_url = "http://localhost:8792/"
 api_key = ""
-default_model = "glm-5.2"
-fallback_model = "glm-5.2"
+default_model = "glm-5.3-flash"
 reasoning_effort = "low"
 max_tokens = 8192
 enabled = true
 
 [providers.providers.model_by_type]
-choice = "glm-5.2"
-fill_blank = "glm-5.2"
-major = "glm-5.2"
+choice = "glm-5.3-flash"
+fill_blank = "glm-5.3-flash"
+major = "glm-5.3-flash"
+
+# 英语一/英语二采用「文章先行」流程：先得到一篇完整文章（自己写或联网搜索），
+# 再基于这篇文章出题；题位与难度来自官方固定结构，不依赖知识点预测。
+[english]
+# write = 由模型撰写原创文章（默认，离线可用）
+# websearch = 先搜索网页取真实文章，失败时自动回退为 write
+article_source = "write"
+# 搜索接口模板，{query} 会替换为 URL 编码后的查询词。留空则始终使用 write。
+# 例：https://api.search.brave.com/res/v1/web/search?q={query}
+search_url = ""
+search_api_key = ""
+search_results = 3

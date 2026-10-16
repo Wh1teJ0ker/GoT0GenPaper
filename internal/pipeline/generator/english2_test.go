@@ -46,7 +46,8 @@ func english2TestSpec() models.SpecTable {
 
 func TestGenerateEnglish2UsesNineSharedMaterialRequests(t *testing.T) {
 	spec := english2TestSpec()
-	calls := 0
+	calls, articleCalls := 0, 0
+	lastArticle := ""
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		var request llm.ChatRequest
@@ -57,9 +58,16 @@ func TestGenerateEnglish2UsesNineSharedMaterialRequests(t *testing.T) {
 		}
 		user, _ := request.Messages[len(request.Messages)-1].Content.(string)
 		var content []byte
-		if strings.Contains(user, "题组编号：") {
+		if isArticleRequest(user) {
+			// Phase 1: the passage the questions will be written from. Each call
+			// returns a distinct article: the generator refuses to reuse a topic
+			// or an opening already used in this paper.
+			articleCalls++
+			lastArticle = fixtureArticleVariant(articleCalls)
+			content = marshalArticleResponse(lastArticle, articleCalls)
+		} else if strings.Contains(user, "题组编号：") {
 			groupID := strings.SplitN(strings.TrimPrefix(user[strings.Index(user, "题组编号："):], "题组编号："), "\n", 2)[0]
-			content = marshalEnglish2GroupFixture(t, groupID)
+			content = marshalEnglish2GroupFixture(t, groupID, lastArticle)
 		} else {
 			stem := "Directions: Write an email based on the task."
 			if strings.Contains(user, "题位46") {
@@ -84,8 +92,13 @@ func TestGenerateEnglish2UsesNineSharedMaterialRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 9 {
-		t.Fatalf("made %d model requests, want 9 grouped requests", calls)
+	// Article-first flow: one passage request per composite group, then one item
+	// request per group, plus the three standalone writing tasks.
+	if articleCalls != 6 {
+		t.Fatalf("made %d article requests, want 6 (one per group)", articleCalls)
+	}
+	if calls != 6+6+3 {
+		t.Fatalf("made %d model requests, want 15 (6 articles + 6 item groups + 3 writing)", calls)
 	}
 	if len(questions) != 48 {
 		t.Fatalf("generated %d questions, want 48", len(questions))
@@ -135,7 +148,7 @@ func TestEnglish2GroupValidationRejectsMalformedCompositeStructures(t *testing.T
 	t.Run("cloze marker boundaries", func(t *testing.T) {
 		entries := english2TestSpec().Entries[:20]
 		var response english2GroupResponse
-		if err := json.Unmarshal(marshalEnglish2GroupFixture(t, "english2-cloze"), &response); err != nil {
+		if err := json.Unmarshal(marshalEnglish2GroupFixture(t, "english2-cloze", fixtureArticleVariant(1)), &response); err != nil {
 			t.Fatal(err)
 		}
 		response.SharedMaterial = strings.Replace(response.SharedMaterial, "[1]", "[10]", 1)
@@ -147,7 +160,7 @@ func TestEnglish2GroupValidationRejectsMalformedCompositeStructures(t *testing.T
 	t.Run("Part B must use named viewpoints", func(t *testing.T) {
 		entries := english2TestSpec().Entries[40:45]
 		var response english2GroupResponse
-		if err := json.Unmarshal(marshalEnglish2GroupFixture(t, "english2-part-b"), &response); err != nil {
+		if err := json.Unmarshal(marshalEnglish2GroupFixture(t, "english2-part-b", fixtureArticleVariant(1)), &response); err != nil {
 			t.Fatal(err)
 		}
 		response.Items[0].Stem = "Paragraph 1"
@@ -159,7 +172,7 @@ func TestEnglish2GroupValidationRejectsMalformedCompositeStructures(t *testing.T
 	t.Run("Part B answers must be one-to-one", func(t *testing.T) {
 		entries := english2TestSpec().Entries[40:45]
 		var response english2GroupResponse
-		if err := json.Unmarshal(marshalEnglish2GroupFixture(t, "english2-part-b"), &response); err != nil {
+		if err := json.Unmarshal(marshalEnglish2GroupFixture(t, "english2-part-b", fixtureArticleVariant(1)), &response); err != nil {
 			t.Fatal(err)
 		}
 		response.Items[1].Answer = response.Items[0].Answer
@@ -171,7 +184,7 @@ func TestEnglish2GroupValidationRejectsMalformedCompositeStructures(t *testing.T
 	t.Run("Part B headings are not repeated per item", func(t *testing.T) {
 		entries := english2TestSpec().Entries[40:45]
 		var response english2GroupResponse
-		if err := json.Unmarshal(marshalEnglish2GroupFixture(t, "english2-part-b"), &response); err != nil {
+		if err := json.Unmarshal(marshalEnglish2GroupFixture(t, "english2-part-b", fixtureArticleVariant(1)), &response); err != nil {
 			t.Fatal(err)
 		}
 		response.Items[0].Options = append([]string(nil), response.SharedOptions...)
@@ -194,7 +207,95 @@ func TestValidateEnglish2SpecRequiresExact2026LayoutAndPoints(t *testing.T) {
 	}
 }
 
-func marshalEnglish2GroupFixture(t *testing.T, groupID string) []byte {
+// TestGenerateEnglish2OfflineFallsBackToPlaceholders covers the no-LLM path:
+// the offline pipeline must still produce a complete, correctly positioned
+// 48-question paper instead of aborting on a missing model client.
+func TestGenerateEnglish2OfflineFallsBackToPlaceholders(t *testing.T) {
+	spec := english2TestSpec()
+	questions, err := New(nil, nil).GenerateAll(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("offline english2 generation failed: %v", err)
+	}
+	if len(questions) != 48 {
+		t.Fatalf("generated %d questions, want 48", len(questions))
+	}
+	for i, question := range questions {
+		if position, ok := models.EnglishQuestionPosition(question.Points); !ok || position != i+1 {
+			t.Errorf("question %d carries 题位 %v (ok=%v)", i+1, position, ok)
+		}
+		if question.Status != "needs_review" || len(question.Warnings) == 0 {
+			t.Errorf("question %d should be flagged as a placeholder, got status=%q warnings=%v", i+1, question.Status, question.Warnings)
+		}
+		if i < 45 && question.GroupID == "" {
+			t.Errorf("question %d lost its composite group id", i+1)
+		}
+		if i >= 45 && question.GroupID != "" {
+			t.Errorf("question %d (translation/writing) must not carry a group id", i+1)
+		}
+	}
+}
+
+// fixtureArticle is the deterministic passage the stub model "writes" in phase
+// one. The item fixture derives its material from this same text, which is what
+// the article-drift invariant requires of a real response.
+func fixtureArticle() string {
+	sentences := []string{
+		"People often learn from careful observation, shared evidence, and conversations that connect research with daily experience.",
+		"A long study followed residents in forty towns and recorded how they changed their habits over a decade.",
+		"Researchers compared the results with local records and found that steady practice mattered more than initial talent.",
+		"The team also interviewed teachers, nurses, and engineers who had adopted the same routines at work.",
+		"Those interviews showed that small adjustments, repeated patiently, produced the clearest improvements.",
+		"Ramni Jannadass identifies the shortage of planting material as a major bottleneck for restoration projects.",
+		"Christopher Kettle explains why infrastructure for collecting and storing seeds is essential to long-term success.",
+		"John Stanturf warns that fast-multiplying forest creatures can threaten the very restoration they are meant to support.",
+		"Pedro Brancalion compares global restoration goals with the practical needs of local communities.",
+		"Robin Chazdon stresses that restoration is about people as well as trees.",
+	}
+	var builder strings.Builder
+	for i := 0; i < 3; i++ {
+		for _, sentence := range sentences {
+			builder.WriteString(sentence)
+			builder.WriteString(" ")
+		}
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+// fixtureArticleVariant returns a distinct passage for the n-th article request:
+// the generator rejects a repeat of a topic or of an opening already used in the
+// same paper, exactly as a real model response would be rejected.
+func fixtureArticleVariant(index int) string {
+	openings := []string{
+		"Urban beekeepers have quietly changed how city rooftops are used across several European capitals.",
+		"Long-distance night trains are returning to routes that closed decades ago, and passengers are noticing.",
+		"Community libraries in small towns now lend tools and sewing machines alongside books.",
+		"Vertical farms inside former warehouses supply salad leaves to supermarkets within a day.",
+		"Old industrial canals are being reopened for freight, which reduces pressure on motorways.",
+		"School playgrounds are being redesigned so that children spend more of the day moving.",
+		"Public drinking fountains are reappearing in city centres as single-use bottles fall out of favour.",
+		"Apprentice schemes in rural workshops are training a new generation of furniture restorers.",
+	}
+	opening := openings[(index-1)%len(openings)]
+	return opening + " " + fixtureArticle()
+}
+
+// isArticleRequest reports whether a prompt asks for the passage (phase one)
+// rather than for questions (phase two).
+func isArticleRequest(user string) bool {
+	return strings.Contains(user, `"topic"`) && !strings.Contains(user, "题组编号：")
+}
+
+// marshalArticleResponse encodes the phase-one JSON payload with a topic that is
+// unique per call, mirroring how a real author would vary the subject.
+func marshalArticleResponse(text string, index int) []byte {
+	content, _ := json.Marshal(map[string]string{
+		"topic":   fmt.Sprintf("fixture topic %d", index),
+		"article": text,
+	})
+	return content
+}
+
+func marshalEnglish2GroupFixture(t *testing.T, groupID, article string) []byte {
 	t.Helper()
 	start, end := 1, 20
 	if groupID == "english2-part-b" {
@@ -203,15 +304,14 @@ func marshalEnglish2GroupFixture(t *testing.T, groupID string) []byte {
 		textNumber := int(groupID[len("english2-reading-")] - '0')
 		start, end = 21+(textNumber-1)*5, 25+(textNumber-1)*5
 	}
-	material := strings.Repeat("People often learn from careful observation, shared evidence, and conversations that connect research with daily experience. ", 20)
+	material := article
 	if groupID == "english2-cloze" {
+		// Cloze: insert the numbered blanks without touching the prose.
 		var markers strings.Builder
 		for number := 1; number <= 20; number++ {
 			fmt.Fprintf(&markers, " [%d]", number)
 		}
 		material += markers.String()
-	} else if groupID == "english2-part-b" {
-		material += " Ramni Jannadass identifies the shortage of planting material as a major bottleneck. Christopher Kettle explains why infrastructure for collecting and storing seeds is essential. John Stanturf warns that fast-multiplying forest creatures can threaten restoration. Pedro Brancalion compares global restoration goals with the practical needs of local communities. Robin Chazdon stresses that restoration is about people as well as trees."
 	}
 	response := english2GroupResponse{SharedMaterial: material}
 	if groupID == "english2-part-b" {

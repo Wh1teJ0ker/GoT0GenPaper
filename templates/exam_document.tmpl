@@ -9,7 +9,7 @@
 \end{flushleft}
 \end{titlepage}
 \pagenumbering{arabic}
-\setcounter{page}{1}
+\setcounter{page}{2}
 \pagestyle{fancy}
 {{%end%}}\begin{center}
 {\zihao{3}\bfseries {{% .HeadLine %}}}\par\vspace{1em}
@@ -17,7 +17,7 @@
 {{%else if .Subject%}}{\zihao{-3}\bfseries {{% .Subject %}} 试题}\par
 {{%end%}}\end{center}\vspace{0.8em}
 
-{{%range .Sections%}}\noindent{\bfseries {{% .Title %}}（{{% .Detail %}}）}\par\vspace{0.6em}
+{{%range .Sections%}}\needspace{6\baselineskip}\noindent{\bfseries {{% .Title %}}（{{% .Detail %}}）}\par\vspace{0.6em}
 
 {{%range .Questions%}}{{% . %}}
 
